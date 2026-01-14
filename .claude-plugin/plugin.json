@@ -1,0 +1,21 @@
+{
+  "name": "letta-subconscious",
+  "version": "1.0.0",
+  "description": "A subconscious for Claude Code. A Letta agent watches your sessions, accumulates context, and whispers guidance back.",
+  "author": {
+    "name": "Letta",
+    "url": "https://letta.com"
+  },
+  "homepage": "https://github.com/letta-ai/letta-subconscious-plugin",
+  "repository": "https://github.com/letta-ai/letta-subconscious-plugin",
+  "license": "Apache-2.0",
+  "keywords": [
+    "letta",
+    "subconscious",
+    "memory",
+    "multi-agent",
+    "async",
+    "deliberation"
+  ],
+  "hooks": "./hooks/hooks.json"
+}
