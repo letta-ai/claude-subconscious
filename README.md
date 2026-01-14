@@ -36,7 +36,7 @@ Claude Code is fast and reactive but stateless - it forgets everything between s
 /plugin marketplace add letta-ai/letta-subconscious-plugin
 
 # Install
-/plugin install letta-subconscious@letta-ai/letta-subconscious-plugin
+/plugin install claude-subconscious@letta-ai/letta-subconscious-plugin
 ```
 
 ## Configuration
