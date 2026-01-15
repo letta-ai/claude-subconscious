@@ -7,6 +7,11 @@
             "type": "command",
             "command": "npx tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/session_start.ts\"",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "npx tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/sync_letta_memory.ts\"",
+            "timeout": 10
           }
         ]
       }
