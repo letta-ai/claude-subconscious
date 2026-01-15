@@ -24,6 +24,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
+import { spawn } from 'child_process';
 
 // Configuration
 const LETTA_API_BASE = 'https://api.letta.com/v1';
@@ -51,19 +52,40 @@ interface HookInput {
   hook_event_name?: string;
 }
 
+interface ContentBlock {
+  type: string;
+  text?: string;
+  thinking?: string;
+  name?: string;        // tool name for tool_use
+  id?: string;          // tool_use_id
+  input?: any;          // tool input
+  tool_use_id?: string; // for tool_result
+  content?: string;     // tool result content
+  is_error?: boolean;   // tool error flag
+}
+
 interface TranscriptMessage {
   type: string;
   role?: string;
-  content?: string | Array<{ type: string; text?: string; thinking?: string }>;
+  content?: string | ContentBlock[];
   message?: {
     role?: string;
-    content?: string | Array<{ type: string; text?: string; thinking?: string }>;
+    content?: string | ContentBlock[];
   };
   tool_name?: string;
   tool_input?: any;
   tool_result?: any;
   timestamp?: string;
   uuid?: string;
+  // Summary message fields
+  summary?: string;
+  // System message fields
+  subtype?: string;
+  stopReason?: string;
+  // File history fields
+  snapshot?: {
+    trackedFileBackups?: Record<string, any>;
+  };
 }
 
 interface SyncState {
@@ -279,97 +301,214 @@ async function getOrCreateConversation(
 }
 
 /**
- * Extract text content from a message
+ * Extract different content types from a message
  */
-function extractContent(msg: TranscriptMessage): string | null {
-  // Check for content in msg.message.content first (Claude Code transcript format)
+interface ExtractedContent {
+  text: string | null;
+  thinking: string | null;
+  toolUses: Array<{ name: string; input: any }>;
+  toolResults: Array<{ toolName: string; content: string; isError: boolean }>;
+}
+
+function extractAllContent(msg: TranscriptMessage): ExtractedContent {
+  const result: ExtractedContent = {
+    text: null,
+    thinking: null,
+    toolUses: [],
+    toolResults: [],
+  };
+
   const content = msg.message?.content ?? msg.content;
-  
+
   if (typeof content === 'string') {
-    return content;
+    result.text = content;
+    return result;
   }
-  
+
   if (Array.isArray(content)) {
-    // Filter for text content, skip thinking blocks
-    const textParts = content
-      .filter(c => c.type === 'text' && c.text)
-      .map(c => c.text);
-    
+    const textParts: string[] = [];
+    const thinkingParts: string[] = [];
+
+    for (const block of content) {
+      if (block.type === 'text' && block.text) {
+        textParts.push(block.text);
+      } else if (block.type === 'thinking' && block.thinking) {
+        thinkingParts.push(block.thinking);
+      } else if (block.type === 'tool_use' && block.name) {
+        result.toolUses.push({
+          name: block.name,
+          input: block.input,
+        });
+      } else if (block.type === 'tool_result') {
+        const resultContent = typeof block.content === 'string'
+          ? block.content
+          : JSON.stringify(block.content);
+        result.toolResults.push({
+          toolName: block.tool_use_id || 'unknown',
+          content: resultContent,
+          isError: block.is_error || false,
+        });
+      }
+    }
+
     if (textParts.length > 0) {
-      return textParts.join('\n');
+      result.text = textParts.join('\n');
+    }
+    if (thinkingParts.length > 0) {
+      result.thinking = thinkingParts.join('\n');
     }
   }
-  
-  return null;
+
+  return result;
 }
 
 /**
- * Format messages for Letta
+ * Truncate text to a maximum length
+ */
+function truncate(text: string, maxLength: number): string {
+  if (text.length <= maxLength) return text;
+  return text.substring(0, maxLength) + '... [truncated]';
+}
+
+/**
+ * Format messages for Letta with rich context
  */
 function formatMessagesForLetta(messages: TranscriptMessage[], startIndex: number): Array<{role: string, text: string}> {
   const formatted: Array<{role: string, text: string}> = [];
-  
+  const toolNameMap: Map<string, string> = new Map(); // tool_use_id -> tool_name
+
   log(`Formatting messages from index ${startIndex + 1} to ${messages.length - 1}`);
-  
+
   for (let i = startIndex + 1; i < messages.length; i++) {
     const msg = messages[i];
-    
-    log(`  Message ${i}: type=${msg.type}, role=${msg.role}`);
-    
+
+    log(`  Message ${i}: type=${msg.type}`);
+
+    // Handle summary messages
+    if (msg.type === 'summary' && msg.summary) {
+      formatted.push({
+        role: 'system',
+        text: `[Session Summary]: ${msg.summary}`,
+      });
+      log(`    -> Added summary`);
+      continue;
+    }
+
+    // Skip file-history-snapshot and system messages (internal)
+    if (msg.type === 'file-history-snapshot' || msg.type === 'system') {
+      continue;
+    }
+
     // Handle user messages
-    if (msg.type === 'user' || msg.type === 'human' || msg.role === 'user') {
-      const content = extractContent(msg);
-      if (content) {
-        formatted.push({ role: 'user', text: content });
-        log(`    -> Added user message (${content.length} chars)`);
+    if (msg.type === 'user') {
+      const extracted = extractAllContent(msg);
+
+      // User text input
+      if (extracted.text) {
+        formatted.push({ role: 'user', text: extracted.text });
+        log(`    -> Added user message (${extracted.text.length} chars)`);
       }
-    }
-    
-    // Handle assistant messages
-    else if (msg.type === 'assistant' || msg.role === 'assistant') {
-      const content = extractContent(msg);
-      if (content) {
-        formatted.push({ role: 'assistant', text: content });
-        log(`    -> Added assistant message (${content.length} chars)`);
-      }
-    }
-    
-    // Handle tool results
-    else if (msg.type === 'tool_result' || msg.tool_result) {
-      const result = msg.tool_result || msg.content;
-      if (result) {
-        const resultText = typeof result === 'string' ? result : JSON.stringify(result);
-        // Truncate very long tool results
-        const truncated = resultText.length > 2000 
-          ? resultText.substring(0, 2000) + '... [truncated]' 
-          : resultText;
-        formatted.push({ 
-          role: 'system', 
-          text: `[Tool Result: ${msg.tool_name || 'unknown'}]\n${truncated}` 
+
+      // Tool results (these come in user messages)
+      for (const toolResult of extracted.toolResults) {
+        const toolName = toolNameMap.get(toolResult.toolName) || toolResult.toolName;
+        const prefix = toolResult.isError ? '[Tool Error' : '[Tool Result';
+        const truncatedContent = truncate(toolResult.content, 1500);
+        formatted.push({
+          role: 'system',
+          text: `${prefix}: ${toolName}]\n${truncatedContent}`,
         });
-        log(`    -> Added tool result (${truncated.length} chars)`);
+        log(`    -> Added tool result for ${toolName} (error: ${toolResult.isError})`);
+      }
+    }
+
+    // Handle assistant messages
+    else if (msg.type === 'assistant') {
+      const extracted = extractAllContent(msg);
+
+      // Track tool names for later result mapping
+      for (const toolUse of extracted.toolUses) {
+        if (toolUse.input?.id) {
+          toolNameMap.set(toolUse.input.id, toolUse.name);
+        }
+      }
+
+      // Assistant thinking (summarized)
+      if (extracted.thinking) {
+        const truncatedThinking = truncate(extracted.thinking, 500);
+        formatted.push({
+          role: 'assistant',
+          text: `[Thinking]: ${truncatedThinking}`,
+        });
+        log(`    -> Added thinking (${extracted.thinking.length} chars, truncated to 500)`);
+      }
+
+      // Tool calls
+      for (const toolUse of extracted.toolUses) {
+        // Format tool input concisely
+        let inputSummary = '';
+        if (toolUse.input) {
+          if (toolUse.name === 'Read' && toolUse.input.file_path) {
+            inputSummary = toolUse.input.file_path;
+          } else if (toolUse.name === 'Edit' && toolUse.input.file_path) {
+            inputSummary = toolUse.input.file_path;
+          } else if (toolUse.name === 'Write' && toolUse.input.file_path) {
+            inputSummary = toolUse.input.file_path;
+          } else if (toolUse.name === 'Bash' && toolUse.input.command) {
+            inputSummary = truncate(toolUse.input.command, 100);
+          } else if (toolUse.name === 'Glob' && toolUse.input.pattern) {
+            inputSummary = toolUse.input.pattern;
+          } else if (toolUse.name === 'Grep' && toolUse.input.pattern) {
+            inputSummary = toolUse.input.pattern;
+          } else if (toolUse.name === 'WebFetch' && toolUse.input.url) {
+            inputSummary = toolUse.input.url;
+          } else if (toolUse.name === 'WebSearch' && toolUse.input.query) {
+            inputSummary = toolUse.input.query;
+          } else if (toolUse.name === 'Task' && toolUse.input.description) {
+            inputSummary = toolUse.input.description;
+          } else {
+            inputSummary = truncate(JSON.stringify(toolUse.input), 100);
+          }
+        }
+
+        formatted.push({
+          role: 'assistant',
+          text: `[Tool: ${toolUse.name}] ${inputSummary}`,
+        });
+        log(`    -> Added tool use: ${toolUse.name}`);
+      }
+
+      // Assistant text response
+      if (extracted.text) {
+        formatted.push({ role: 'assistant', text: extracted.text });
+        log(`    -> Added assistant text (${extracted.text.length} chars)`);
       }
     }
   }
-  
+
   log(`Formatted ${formatted.length} messages total`);
   return formatted;
+}
+
+interface SendResult {
+  skipped: boolean;
 }
 
 /**
  * Send a message to a Letta conversation
  * Note: The conversations API streams responses, so we consume minimally
+ * Returns { skipped: true } if conversation is busy (409), otherwise { skipped: false }
  */
 async function sendMessageToConversation(
-  apiKey: string, 
-  conversationId: string, 
-  role: string, 
+  apiKey: string,
+  conversationId: string,
+  role: string,
   text: string
-): Promise<void> {
+): Promise<SendResult> {
   const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages`;
-  
+
   log(`Sending ${role} message to conversation ${conversationId} (${text.length} chars)`);
-  
+
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -387,13 +526,19 @@ async function sendMessageToConversation(
   });
 
   log(`  Response status: ${response.status}`);
-  
+
+  // Handle 409 Conflict gracefully - conversation is busy, skip and retry on next Stop
+  if (response.status === 409) {
+    log(`  Conversation busy (409) - skipping, will sync on next Stop`);
+    return { skipped: true };
+  }
+
   if (!response.ok) {
     const errorText = await response.text();
     log(`  Error response: ${errorText}`);
     throw new Error(`Letta API error (${response.status}): ${errorText}`);
   }
-  
+
   // Consume the stream minimally - just read first chunk to confirm it started
   // The agent will continue processing in the background
   const reader = response.body?.getReader();
@@ -408,22 +553,24 @@ async function sendMessageToConversation(
       reader.cancel(); // Release the stream
     }
   }
-  
+
   log(`  Message sent to conversation successfully`);
+  return { skipped: false };
 }
 
 /**
  * Send batch of messages to Letta conversation (as a combined system message for context)
+ * Returns { skipped: true } if conversation was busy, { skipped: false } otherwise
  */
 async function sendBatchToConversation(
   apiKey: string,
   conversationId: string,
   sessionId: string,
   messages: Array<{role: string, text: string}>
-): Promise<void> {
+): Promise<SendResult> {
   if (messages.length === 0) {
     log(`No messages to send`);
-    return;
+    return { skipped: false };
   }
 
   // Format as a conversation summary
@@ -450,7 +597,7 @@ You may provide commentary or guidance for Claude Code. Your response will be ad
 Write your response as if speaking directly to Claude Code.`;
 
   log(`Sending batch of ${messages.length} messages to conversation ${conversationId}`);
-  await sendMessageToConversation(apiKey, conversationId, 'system', systemMessage);
+  return await sendMessageToConversation(apiKey, conversationId, 'system', systemMessage);
 }
 
 /**
@@ -523,14 +670,57 @@ async function main(): Promise<void> {
     const conversationId = await getOrCreateConversation(apiKey, agentId, hookInput.session_id, hookInput.cwd, state);
     log(`Using conversation: ${conversationId}`);
 
-    // Send to Letta conversation
-    await sendBatchToConversation(apiKey, conversationId, hookInput.session_id, newMessages);
-    
-    // Update state (to durable storage)
-    state.lastProcessedIndex = messages.length - 1;
+    // Save state now (with conversation ID) so it persists even if worker fails
     saveSyncState(hookInput.cwd, state);
-    
-    log('Completed successfully');
+
+    // Build the message payload (same format as sendBatchToConversation)
+    const conversationSummary = newMessages.map(m => {
+      const roleLabel = m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Claude Code' : 'System';
+      return `[${roleLabel}]: ${m.text}`;
+    }).join('\n\n---\n\n');
+
+    const systemMessage = `[Claude Code Session Update]
+Session ID: ${hookInput.session_id}
+
+The following conversation occurred in Claude Code:
+
+${conversationSummary}
+
+---
+
+You may provide commentary or guidance for Claude Code. Your response will be added to Claude's context window (in the <letta_message> section of CLAUDE.md) on the next prompt. Use this to:
+- Offer observations about the user's work
+- Provide reminders or context from your memory
+- Suggest approaches or flag potential issues
+- Send async messages/guidance to Claude Code
+
+Write your response as if speaking directly to Claude Code.`;
+
+    // Write payload to temp file for the worker
+    const payloadFile = path.join(TEMP_STATE_DIR, `payload-${hookInput.session_id}-${Date.now()}.json`);
+    const payload = {
+      apiKey,
+      conversationId,
+      sessionId: hookInput.session_id,
+      message: systemMessage,
+      stateFile: getSyncStateFile(hookInput.cwd, hookInput.session_id),
+      newLastProcessedIndex: messages.length - 1,
+    };
+    fs.writeFileSync(payloadFile, JSON.stringify(payload), 'utf-8');
+    log(`Wrote payload to ${payloadFile}`);
+
+    // Spawn worker as detached background process
+    const workerScript = path.join(__dirname, 'send_worker.ts');
+    const child = spawn('npx', ['tsx', workerScript, payloadFile], {
+      detached: true,
+      stdio: 'ignore',
+      cwd: hookInput.cwd,
+      env: process.env,
+    });
+    child.unref();
+    log(`Spawned background worker (PID: ${child.pid})`);
+
+    log('Hook completed (worker running in background)');
 
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

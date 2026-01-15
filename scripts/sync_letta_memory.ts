@@ -62,7 +62,7 @@ interface LastMessageInfo {
  * Fetch agent data from Letta API
  */
 async function fetchAgent(apiKey: string, agentId: string): Promise<Agent> {
-  const url = `${LETTA_API_BASE}/agents/${agentId}`;
+  const url = `${LETTA_API_BASE}/agents/${agentId}?include=agent.blocks`;
   
   const response = await fetch(url, {
     method: 'GET',
@@ -160,11 +160,11 @@ ${LETTA_SECTION_END}`;
   }
 
   const formattedBlocks = blocks.map(block => {
-    // Escape XML special characters in description
+    // Escape XML special characters in description and content
     const escapedDescription = escapeXmlAttribute(block.description || '');
-    const content = block.value || '';
-    
-    return `<${block.label} description="${escapedDescription}">\n${content}\n</${block.label}>`;
+    const escapedContent = escapeXmlContent(block.value || '');
+
+    return `<${block.label} description="${escapedDescription}">\n${escapedContent}\n</${block.label}>`;
   }).join('\n');
 
   return `${LETTA_SECTION_START}
@@ -220,6 +220,17 @@ function escapeXmlAttribute(str: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/\n/g, ' '); // Replace newlines with spaces in attributes
+}
+
+/**
+ * Escape special characters for XML element content
+ * Only escapes &, <, > (quotes are fine in content)
+ */
+function escapeXmlContent(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 /**
