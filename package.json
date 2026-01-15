@@ -1,0 +1,40 @@
+{
+  "name": "claude-subconscious",
+  "version": "1.0.0",
+  "description": "A subconscious for Claude Code. A Letta agent watches your sessions, accumulates context, and whispers guidance back.",
+  "author": "Letta <hello@letta.com> (https://letta.com)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/letta-ai/claude-subconscious.git"
+  },
+  "homepage": "https://github.com/letta-ai/claude-subconscious#readme",
+  "bugs": {
+    "url": "https://github.com/letta-ai/claude-subconscious/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "letta",
+    "subconscious",
+    "memory",
+    "multi-agent",
+    "async",
+    "deliberation"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "sync": "tsx scripts/sync_letta_memory.ts",
+    "send": "tsx scripts/send_messages_to_letta.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
+  }
+}

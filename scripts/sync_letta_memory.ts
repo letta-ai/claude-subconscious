@@ -18,6 +18,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as readline from 'readline';
 
 // Configuration
 const LETTA_API_BASE = 'https://api.letta.com/v1';
@@ -29,8 +30,6 @@ const LETTA_CONTEXT_START = '<letta_context>';
 const LETTA_CONTEXT_END = '</letta_context>';
 const LETTA_MEMORY_START = '<letta_memory_blocks>';
 const LETTA_MEMORY_END = '</letta_memory_blocks>';
-const LETTA_MESSAGE_START = '<letta_message>';
-const LETTA_MESSAGE_END = '</letta_message>';
 
 interface MemoryBlock {
   label: string;
@@ -56,6 +55,71 @@ interface LettaMessage {
 interface LastMessageInfo {
   text: string;
   date: string | null;
+}
+
+interface HookInput {
+  session_id: string;
+  cwd: string;
+}
+
+interface SessionState {
+  conversationId?: string;
+}
+
+// State directory helpers
+function getDurableStateDir(cwd: string): string {
+  return path.join(cwd, '.letta', 'claude');
+}
+
+function getSyncStateFile(cwd: string, sessionId: string): string {
+  return path.join(getDurableStateDir(cwd), `session-${sessionId}.json`);
+}
+
+/**
+ * Read hook input from stdin
+ */
+async function readHookInput(): Promise<HookInput | null> {
+  return new Promise((resolve) => {
+    let input = '';
+    const rl = readline.createInterface({ input: process.stdin });
+    
+    rl.on('line', (line) => {
+      input += line;
+    });
+    
+    rl.on('close', () => {
+      if (!input.trim()) {
+        resolve(null);
+        return;
+      }
+      try {
+        resolve(JSON.parse(input));
+      } catch {
+        resolve(null);
+      }
+    });
+
+    // Timeout after 100ms if no input
+    setTimeout(() => {
+      rl.close();
+    }, 100);
+  });
+}
+
+/**
+ * Get conversation ID from session state
+ */
+function getConversationId(cwd: string, sessionId: string): string | null {
+  const stateFile = getSyncStateFile(cwd, sessionId);
+  if (fs.existsSync(stateFile)) {
+    try {
+      const state: SessionState = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+      return state.conversationId || null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 /**
@@ -122,19 +186,22 @@ async function fetchLastAssistantMessage(apiKey: string, agentId: string): Promi
 /**
  * Format the context section with agent info
  */
-function formatContextSection(agent: Agent): string {
+function formatContextSection(agent: Agent, conversationId: string | null): string {
   const agentUrl = `${LETTA_APP_BASE}/agents/${agent.id}`;
   const agentName = agent.name || 'Unnamed Agent';
   const agentDesc = agent.description || 'No description provided';
+  const conversationLine = conversationId 
+    ? `Conversation: ${LETTA_APP_BASE}/conversations/${conversationId}`
+    : '';
   
   return `${LETTA_CONTEXT_START}
 **Subconscious Layer (Letta Agent)**
 
 Agent: ${agentName}
 Description: ${agentDesc}
-View: ${agentUrl}
+View: ${agentUrl}${conversationLine ? '\n' + conversationLine : ''}
 
-This agent maintains persistent memory across your sessions. It observes your conversations asynchronously and provides guidance below in <letta_message>. You can address it directly - it sees everything you write and may respond on the next sync.
+This agent maintains persistent memory across your sessions. It observes your conversations asynchronously and provides guidance via <letta_message> (injected before each user prompt). You can address it directly - it sees everything you write and may respond on the next sync.
 
 Memory blocks below are the agent's long-term storage. Reference as needed.
 ${LETTA_CONTEXT_END}`;
@@ -143,11 +210,11 @@ ${LETTA_CONTEXT_END}`;
 /**
  * Format memory blocks as XML
  */
-function formatMemoryBlocksAsXml(agent: Agent): string {
+function formatMemoryBlocksAsXml(agent: Agent, conversationId: string | null): string {
   const blocks = agent.blocks;
   
   // Format context section
-  const contextSection = formatContextSection(agent);
+  const contextSection = formatContextSection(agent, conversationId);
   
   if (!blocks || blocks.length === 0) {
     return `${LETTA_SECTION_START}
@@ -177,36 +244,19 @@ ${LETTA_SECTION_END}`;
 }
 
 /**
- * Format the last assistant message as XML
+ * Format the last assistant message for stdout injection
  */
-function formatLastMessageAsXml(agent: Agent, messageInfo: LastMessageInfo | null): string {
-  const agentName = agent.name || 'Unnamed Agent';
+function formatMessageForStdout(agent: Agent, messageInfo: LastMessageInfo | null): string {
+  const agentName = agent.name || 'Letta Agent';
   
   if (!messageInfo) {
-    return `${LETTA_MESSAGE_START}
-<!-- No recent message from ${agentName} -->
-${LETTA_MESSAGE_END}`;
+    return `<!-- No letta message -->`;
   }
   
-  const timestamp = messageInfo.date 
-    ? `**Timestamp**: ${messageInfo.date}` 
-    : '**Timestamp**: Unknown';
-  
-  return `${LETTA_MESSAGE_START}
-<!--
-  ASYNC MESSAGE FROM LETTA AGENT
-  
-  This is the most recent message from "${agentName}".
-  
-  NOTE: This message may not be current or directly relevant to your current task.
-  The Letta agent processes Claude Code conversations asynchronously and may provide
-  commentary, guidance, or context that was generated in response to earlier interactions.
-  
-  ${timestamp}
--->
-
+  const timestamp = messageInfo.date || 'unknown';
+  return `<letta_message from="${agentName}" timestamp="${timestamp}">
 ${messageInfo.text}
-${LETTA_MESSAGE_END}`;
+</letta_message>`;
 }
 
 /**
@@ -234,9 +284,9 @@ function escapeXmlContent(str: string): string {
 }
 
 /**
- * Update CLAUDE.md with the new Letta section and message
+ * Update CLAUDE.md with the new Letta memory section (message is now output to stdout)
  */
-function updateClaudeMd(projectDir: string, lettaContent: string, messageContent: string): void {
+function updateClaudeMd(projectDir: string, lettaContent: string): void {
   const claudeMdPath = path.join(projectDir, CLAUDE_MD_PATH);
   
   let existingContent = '';
@@ -274,19 +324,12 @@ function updateClaudeMd(projectDir: string, lettaContent: string, messageContent
     updatedContent = existingContent.trimEnd() + '\n\n' + lettaContent + '\n';
   }
 
-  // Replace or append the <letta_message> section
-  const messagePattern = `^${escapeRegex(LETTA_MESSAGE_START)}[\\s\\S]*?^${escapeRegex(LETTA_MESSAGE_END)}$`;
-  const messageRegex = new RegExp(messagePattern, 'gm');
+  // Clean up any orphaned <letta_message> sections (now delivered via stdout)
+  const messagePattern = /^<letta_message>[\s\S]*?^<\/letta_message>\n*/gm;
+  updatedContent = updatedContent.replace(messagePattern, '');
   
-  if (messageRegex.test(updatedContent)) {
-    // Reset regex after test() consumed position
-    messageRegex.lastIndex = 0;
-    // Replace existing section
-    updatedContent = updatedContent.replace(messageRegex, messageContent);
-  } else {
-    // Append after letta section
-    updatedContent = updatedContent.trimEnd() + '\n\n' + messageContent + '\n';
-  }
+  // Clean up any trailing whitespace/newlines
+  updatedContent = updatedContent.trimEnd() + '\n';
 
   fs.writeFileSync(claudeMdPath, updatedContent, 'utf-8');
 }
@@ -319,6 +362,16 @@ async function main(): Promise<void> {
   }
 
   try {
+    // Read hook input to get session ID for conversation lookup
+    const hookInput = await readHookInput();
+    const cwd = hookInput?.cwd || projectDir;
+    
+    // Get conversation ID from session state
+    let conversationId: string | null = null;
+    if (hookInput?.session_id) {
+      conversationId = getConversationId(cwd, hookInput.session_id);
+    }
+    
     // Fetch agent data and last message in parallel
     const [agent, lastMessage] = await Promise.all([
       fetchAgent(apiKey, agentId),
@@ -326,16 +379,15 @@ async function main(): Promise<void> {
     ]);
     
     // Format memory blocks as XML (includes context section)
-    const lettaContent = formatMemoryBlocksAsXml(agent);
+    const lettaContent = formatMemoryBlocksAsXml(agent, conversationId);
     
-    // Format last message as XML (includes agent info and timestamp)
-    const messageContent = formatLastMessageAsXml(agent, lastMessage);
+    // Update CLAUDE.md with memory blocks only
+    updateClaudeMd(cwd, lettaContent);
     
-    // Update CLAUDE.md
-    updateClaudeMd(projectDir, lettaContent, messageContent);
-    
-    // Success - don't output anything for UserPromptSubmit hooks
-    // (stdout would be added to context, which we don't want)
+    // Output last message to stdout - this gets injected before the user's prompt
+    // (UserPromptSubmit hooks add stdout to context)
+    const messageOutput = formatMessageForStdout(agent, lastMessage);
+    console.log(messageOutput);
     
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

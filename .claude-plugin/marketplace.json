@@ -1,0 +1,13 @@
+{
+  "name": "claude-subconscious",
+  "owner": {
+    "name": "Letta",
+    "url": "https://letta.com"
+  },
+  "plugins": [
+    {
+      "name": "claude-subconscious",
+      "source": "./"
+    }
+  ]
+}
