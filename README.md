@@ -147,7 +147,7 @@ Your Letta agent's memory and messages appear in `.claude/CLAUDE.md`:
 Agent: herald
 Description: Research-focused AI exploring emergence and multi-agent systems.
 View: https://app.letta.com/agents/agent-xxx
-Conversation: https://app.letta.com/conversations/convo-xxx
+Conversation: https://app.letta.com/agents/agent-xxx?conversation=convo-xxx
 
 This agent maintains persistent memory across your sessions. It observes your
 conversations asynchronously and provides guidance below in <letta_message>.
