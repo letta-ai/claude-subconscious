@@ -19,6 +19,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
+import { getAgentId } from './agent_config.js';
 
 // Configuration
 const LETTA_API_BASE = 'https://api.letta.com/v1';
@@ -478,7 +479,6 @@ function escapeRegex(str: string): string {
 async function main(): Promise<void> {
   // Get environment variables
   const apiKey = process.env.LETTA_API_KEY;
-  const agentId = process.env.LETTA_AGENT_ID;
   const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
   // Validate required environment variables
@@ -487,12 +487,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  if (!agentId) {
-    console.error('Error: LETTA_AGENT_ID environment variable is not set');
-    process.exit(1);
-  }
-
   try {
+    // Get agent ID (from env, saved config, or auto-import)
+    const agentId = await getAgentId(apiKey);
     // Read hook input to get session ID for conversation lookup
     const hookInput = await readHookInput();
     const cwd = hookInput?.cwd || projectDir;

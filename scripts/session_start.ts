@@ -23,6 +23,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { getAgentId } from './agent_config.js';
 
 // Configuration
 const LETTA_API_BASE = 'https://api.letta.com/v1';
@@ -242,15 +243,16 @@ async function main(): Promise<void> {
   log('session_start.ts started');
 
   const apiKey = process.env.LETTA_API_KEY;
-  const agentId = process.env.LETTA_AGENT_ID;
 
-  if (!apiKey || !agentId) {
-    log('ERROR: Missing required environment variables');
-    console.error('Error: LETTA_API_KEY and LETTA_AGENT_ID must be set');
+  if (!apiKey) {
+    log('ERROR: LETTA_API_KEY not set');
+    console.error('Error: LETTA_API_KEY must be set');
     process.exit(1);
   }
 
   try {
+    // Get agent ID (from env, saved config, or auto-import)
+    const agentId = await getAgentId(apiKey, log);
     // Read hook input
     log('Reading hook input from stdin...');
     const hookInput = await readHookInput();

@@ -26,6 +26,7 @@ import * as path from 'path';
 import * as readline from 'readline';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import { getAgentId } from './agent_config.js';
 
 // ESM-compatible __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -652,18 +653,19 @@ async function main(): Promise<void> {
   
   // Get environment variables
   const apiKey = process.env.LETTA_API_KEY;
-  const agentId = process.env.LETTA_AGENT_ID;
 
   log(`LETTA_API_KEY: ${apiKey ? 'set (' + apiKey.substring(0, 10) + '...)' : 'NOT SET'}`);
-  log(`LETTA_AGENT_ID: ${agentId || 'NOT SET'}`);
 
-  if (!apiKey || !agentId) {
-    log('ERROR: Missing required environment variables');
-    console.error('Error: LETTA_API_KEY and LETTA_AGENT_ID must be set');
+  if (!apiKey) {
+    log('ERROR: LETTA_API_KEY not set');
+    console.error('Error: LETTA_API_KEY must be set');
     process.exit(1);
   }
 
   try {
+    // Get agent ID (from env, saved config, or auto-import)
+    const agentId = await getAgentId(apiKey, log);
+    log(`Using agent: ${agentId}`);
     // Read hook input
     log('Reading hook input from stdin...');
     const hookInput = await readHookInput();
