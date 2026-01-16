@@ -190,20 +190,63 @@ function detectChangedBlocks(
 }
 
 /**
- * Format changed blocks for stdout injection
+ * Compute a simple line-based diff between two strings
  */
-function formatChangedBlocksForStdout(changedBlocks: MemoryBlock[]): string {
+function computeDiff(oldValue: string, newValue: string): { added: string[], removed: string[] } {
+  const oldLines = oldValue.split('\n').map(l => l.trim()).filter(l => l);
+  const newLines = newValue.split('\n').map(l => l.trim()).filter(l => l);
+  
+  const oldSet = new Set(oldLines);
+  const newSet = new Set(newLines);
+  
+  const added = newLines.filter(line => !oldSet.has(line));
+  const removed = oldLines.filter(line => !newSet.has(line));
+  
+  return { added, removed };
+}
+
+/**
+ * Format changed blocks for stdout injection with diffs
+ */
+function formatChangedBlocksForStdout(
+  changedBlocks: MemoryBlock[],
+  lastBlockValues: { [label: string]: string } | null
+): string {
   if (changedBlocks.length === 0) {
     return '';
   }
   
   const formatted = changedBlocks.map(block => {
-    const escapedContent = escapeXmlContent(block.value || '');
-    return `<${block.label}>\n${escapedContent}\n</${block.label}>`;
+    const previousValue = lastBlockValues?.[block.label];
+    
+    // New block - show full content
+    if (previousValue === undefined) {
+      const escapedContent = escapeXmlContent(block.value || '');
+      return `<${block.label} status="new">\n${escapedContent}\n</${block.label}>`;
+    }
+    
+    // Existing block - show diff
+    const diff = computeDiff(previousValue, block.value || '');
+    
+    if (diff.added.length === 0 && diff.removed.length === 0) {
+      // Whitespace-only change, show full content
+      const escapedContent = escapeXmlContent(block.value || '');
+      return `<${block.label} status="modified">\n${escapedContent}\n</${block.label}>`;
+    }
+    
+    const diffLines: string[] = [];
+    for (const line of diff.removed) {
+      diffLines.push(`- ${escapeXmlContent(line)}`);
+    }
+    for (const line of diff.added) {
+      diffLines.push(`+ ${escapeXmlContent(line)}`);
+    }
+    
+    return `<${block.label} status="modified">\n${diffLines.join('\n')}\n</${block.label}>`;
   }).join('\n');
   
   return `<letta_memory_update>
-<!-- Memory blocks updated since last prompt -->
+<!-- Memory blocks updated since last prompt (showing diff) -->
 ${formatted}
 </letta_memory_update>`;
 }
@@ -488,7 +531,7 @@ async function main(): Promise<void> {
     const outputs: string[] = [];
     
     // Add changed blocks if any
-    const changedBlocksOutput = formatChangedBlocksForStdout(changedBlocks);
+    const changedBlocksOutput = formatChangedBlocksForStdout(changedBlocks, lastBlockValues);
     if (changedBlocksOutput) {
       outputs.push(changedBlocksOutput);
     }
