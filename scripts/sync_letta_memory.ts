@@ -9,6 +9,7 @@
  *   LETTA_API_KEY - API key for Letta authentication
  *   LETTA_AGENT_ID - Agent ID to fetch memory blocks from
  *   CLAUDE_PROJECT_DIR - Project directory (set by Claude Code)
+ *   LETTA_DEBUG - Set to "1" to enable debug logging to stderr
  * 
  * Exit Codes:
  *   0 - Success
@@ -19,11 +20,32 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 import { getAgentId } from './agent_config.js';
+import {
+  loadSyncState,
+  saveSyncState,
+  getOrCreateConversation,
+  getSyncStateFile,
+  lookupConversation,
+  SyncState,
+} from './conversation_utils.js';
+
+// ESM-compatible __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Configuration
 const LETTA_API_BASE = 'https://api.letta.com/v1';
 const LETTA_APP_BASE = 'https://app.letta.com';
+const DEBUG = process.env.LETTA_DEBUG === '1';
+
+function debug(...args: unknown[]): void {
+  if (DEBUG) {
+    console.error('[sync debug]', ...args);
+  }
+}
 const CLAUDE_MD_PATH = '.claude/CLAUDE.md';
 const LETTA_SECTION_START = '<letta>';
 const LETTA_SECTION_END = '</letta>';
@@ -53,7 +75,8 @@ interface LettaMessage {
   date?: string;
 }
 
-interface LastMessageInfo {
+interface MessageInfo {
+  id: string;
   text: string;
   date: string | null;
 }
@@ -61,21 +84,12 @@ interface LastMessageInfo {
 interface HookInput {
   session_id: string;
   cwd: string;
+  prompt?: string;  // User's prompt text (available on UserPromptSubmit)
+  transcript_path?: string;  // Path to transcript JSONL
 }
 
-interface SessionState {
-  conversationId?: string;
-  lastBlockValues?: { [label: string]: string };  // label -> value for change detection
-}
-
-// State directory helpers
-function getDurableStateDir(cwd: string): string {
-  return path.join(cwd, '.letta', 'claude');
-}
-
-function getSyncStateFile(cwd: string, sessionId: string): string {
-  return path.join(getDurableStateDir(cwd), `session-${sessionId}.json`);
-}
+// Temp state directory for logs
+const TEMP_STATE_DIR = '/tmp/letta-claude-sync';
 
 /**
  * Read hook input from stdin
@@ -109,66 +123,14 @@ async function readHookInput(): Promise<HookInput | null> {
 }
 
 /**
- * Get conversation ID from session state
+ * Count lines in transcript file (for tracking lastProcessedIndex)
  */
-function getConversationId(cwd: string, sessionId: string): string | null {
-  const stateFile = getSyncStateFile(cwd, sessionId);
-  if (fs.existsSync(stateFile)) {
-    try {
-      const state: SessionState = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
-      return state.conversationId || null;
-    } catch {
-      return null;
-    }
+function countTranscriptLines(transcriptPath: string): number {
+  if (!fs.existsSync(transcriptPath)) {
+    return 0;
   }
-  return null;
-}
-
-/**
- * Get last known block values from session state
- */
-function getLastBlockValues(cwd: string, sessionId: string): { [label: string]: string } | null {
-  const stateFile = getSyncStateFile(cwd, sessionId);
-  if (fs.existsSync(stateFile)) {
-    try {
-      const state: SessionState = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
-      return state.lastBlockValues || null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-/**
- * Save current block values to session state for change detection
- */
-function saveBlockValues(cwd: string, sessionId: string, blocks: MemoryBlock[]): void {
-  const stateFile = getSyncStateFile(cwd, sessionId);
-  let state: SessionState = {};
-  
-  // Load existing state
-  if (fs.existsSync(stateFile)) {
-    try {
-      state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
-    } catch {
-      // Start fresh if parse fails
-    }
-  }
-  
-  // Update block values
-  state.lastBlockValues = {};
-  for (const block of blocks) {
-    state.lastBlockValues[block.label] = block.value;
-  }
-  
-  // Ensure directory exists
-  const dir = getDurableStateDir(cwd);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  
-  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf-8');
+  const content = fs.readFileSync(transcriptPath, 'utf-8');
+  return content.split('\n').filter(line => line.trim()).length;
 }
 
 /**
@@ -275,15 +237,19 @@ async function fetchAgent(apiKey: string, agentId: string): Promise<Agent> {
 }
 
 /**
- * Fetch the last assistant message from the conversation history
+ * Fetch all assistant messages from the conversation history since last seen
  */
-async function fetchLastAssistantMessage(apiKey: string, conversationId: string | null): Promise<LastMessageInfo | null> {
+async function fetchAssistantMessages(
+  apiKey: string, 
+  conversationId: string | null,
+  lastSeenMessageId: string | null
+): Promise<{ messages: MessageInfo[], lastMessageId: string | null }> {
   if (!conversationId) {
-    // No conversation yet, return null
-    return null;
+    // No conversation yet, return empty
+    return { messages: [], lastMessageId: null };
   }
 
-  const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages?limit=10`;
+  const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages?limit=50`;
 
   const response = await fetch(url, {
     method: 'GET',
@@ -294,28 +260,53 @@ async function fetchLastAssistantMessage(apiKey: string, conversationId: string 
   });
 
   if (!response.ok) {
-    // Don't fail if we can't fetch messages, just return null
-    return null;
+    // Don't fail if we can't fetch messages, just return empty
+    return { messages: [], lastMessageId: lastSeenMessageId };
   }
 
-  const messages: LettaMessage[] = await response.json();
-  
-  // Find the last assistant_message (search from end)
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.message_type === 'assistant_message') {
-      // Extract text content
-      const text = msg.content || msg.text;
-      if (text && typeof text === 'string') {
-        return {
-          text,
-          date: msg.date || null,
-        };
-      }
+  const allMessages: LettaMessage[] = await response.json();
+  debug(`Fetched ${allMessages.length} total messages from conversation`);
+
+  // Filter to assistant messages only
+  // NOTE: API returns messages newest-first
+  const assistantMessages = allMessages.filter(msg => msg.message_type === 'assistant_message');
+  debug(`Found ${assistantMessages.length} assistant messages`);
+
+  // Find the index of the last seen message
+  // Since messages are newest-first, new messages are BEFORE lastSeenIndex (indices 0 to lastSeenIndex-1)
+  let endIndex = assistantMessages.length; // Default: return all messages
+  if (lastSeenMessageId) {
+    const lastSeenIndex = assistantMessages.findIndex(msg => msg.id === lastSeenMessageId);
+    debug(`lastSeenMessageId=${lastSeenMessageId}, lastSeenIndex=${lastSeenIndex}`);
+    if (lastSeenIndex !== -1) {
+      // Only return messages newer than the last seen one (before it in the array)
+      endIndex = lastSeenIndex;
     }
   }
-  
-  return null;
+  debug(`endIndex=${endIndex}, will return messages from index 0 to ${endIndex - 1}`);
+
+  // Get new messages (from 0 to endIndex, which are the newest messages)
+  const newMessages: MessageInfo[] = [];
+  for (let i = 0; i < endIndex; i++) {
+    const msg = assistantMessages[i];
+    const text = msg.content || msg.text;
+    if (text && typeof text === 'string') {
+      newMessages.push({
+        id: msg.id,
+        text,
+        date: msg.date || null,
+      });
+    }
+  }
+  debug(`Returning ${newMessages.length} new messages`);
+
+  // Get the last message ID for tracking (the NEWEST message, which is first in the array)
+  const lastMessageId = assistantMessages.length > 0
+    ? assistantMessages[0].id
+    : lastSeenMessageId;
+  debug(`Setting lastMessageId=${lastMessageId}`);
+
+  return { messages: newMessages, lastMessageId };
 }
 
 /**
@@ -381,19 +372,25 @@ ${LETTA_SECTION_END}`;
 }
 
 /**
- * Format the last assistant message for stdout injection
+ * Format assistant messages for stdout injection
  */
-function formatMessageForStdout(agent: Agent, messageInfo: LastMessageInfo | null): string {
+function formatMessagesForStdout(agent: Agent, messages: MessageInfo[]): string {
   const agentName = agent.name || 'Letta Agent';
   
-  if (!messageInfo) {
-    return `<!-- No letta message -->`;
+  if (messages.length === 0) {
+    return `<!-- No new messages from ${agentName} -->`;
   }
   
-  const timestamp = messageInfo.date || 'unknown';
-  return `<letta_message from="${agentName}" timestamp="${timestamp}">
-${messageInfo.text}
+  // Format each message
+  const formattedMessages = messages.map((msg, index) => {
+    const timestamp = msg.date || 'unknown';
+    const msgNum = messages.length > 1 ? ` (${index + 1}/${messages.length})` : '';
+    return `<letta_message from="${agentName}"${msgNum} timestamp="${timestamp}">
+${msg.text}
 </letta_message>`;
+  });
+  
+  return formattedMessages.join('\n\n');
 }
 
 /**
@@ -500,19 +497,31 @@ async function main(): Promise<void> {
     const cwd = hookInput?.cwd || projectDir;
     const sessionId = hookInput?.session_id;
     
-    // Get conversation ID and last block values from session state
-    let conversationId: string | null = null;
-    let lastBlockValues: { [label: string]: string } | null = null;
+    // Load state using shared utility
+    let state: SyncState | null = null;
     if (sessionId) {
-      conversationId = getConversationId(cwd, sessionId);
-      lastBlockValues = getLastBlockValues(cwd, sessionId);
+      state = loadSyncState(cwd, sessionId);
     }
     
-    // Fetch agent data and last message in parallel
-    const [agent, lastMessage] = await Promise.all([
+    // Recover conversationId from conversations.json if state doesn't have it
+    let conversationId = state?.conversationId || null;
+    if (!conversationId && sessionId) {
+      conversationId = lookupConversation(cwd, sessionId);
+      // Update state so we don't have to look it up again
+      if (conversationId && state) {
+        state.conversationId = conversationId;
+      }
+    }
+    const lastBlockValues = state?.lastBlockValues || null;
+    const lastSeenMessageId = state?.lastSeenMessageId || null;
+    
+    // Fetch agent data and messages in parallel
+    const [agent, messagesResult] = await Promise.all([
       fetchAgent(apiKey, agentId),
-      fetchLastAssistantMessage(apiKey, conversationId),
+      fetchAssistantMessages(apiKey, conversationId, lastSeenMessageId),
     ]);
+    
+    const { messages: newMessages, lastMessageId } = messagesResult;
     
     // Detect which blocks have changed since last sync
     const changedBlocks = detectChangedBlocks(agent.blocks || [], lastBlockValues);
@@ -523,9 +532,16 @@ async function main(): Promise<void> {
     // Update CLAUDE.md with full memory blocks
     updateClaudeMd(cwd, lettaContent);
     
-    // Save current block values for next sync's change detection
-    if (sessionId) {
-      saveBlockValues(cwd, sessionId, agent.blocks || []);
+    // Update state with block values and last seen message ID
+    if (state) {
+      state.lastBlockValues = {};
+      for (const block of agent.blocks || []) {
+        state.lastBlockValues[block.label] = block.value;
+      }
+      // Track the last message we've seen
+      if (lastMessageId) {
+        state.lastSeenMessageId = lastMessageId;
+      }
     }
     
     // Output to stdout - this gets injected before the user's prompt
@@ -538,11 +554,65 @@ async function main(): Promise<void> {
       outputs.push(changedBlocksOutput);
     }
     
-    // Add last message
-    const messageOutput = formatMessageForStdout(agent, lastMessage);
+    // Add all new messages from Sub
+    const messageOutput = formatMessagesForStdout(agent, newMessages);
     outputs.push(messageOutput);
     
     console.log(outputs.join('\n\n'));
+    
+    // Send user prompt to Letta early (gives Letta a head start while Claude processes)
+    if (sessionId && hookInput?.prompt && state) {
+      try {
+        // Ensure we have a conversation
+        const convId = await getOrCreateConversation(apiKey, agentId, sessionId, cwd, state);
+        
+        // Get current transcript length for index tracking
+        const transcriptLength = hookInput.transcript_path 
+          ? countTranscriptLines(hookInput.transcript_path)
+          : 0;
+        
+        // Format the prompt message
+        const promptMessage = `<claude_code_user_prompt>
+<session_id>${sessionId}</session_id>
+<prompt>${escapeXmlContent(hookInput.prompt)}</prompt>
+<note>Early notification - Claude Code is processing this now. Full transcript with response will follow.</note>
+</claude_code_user_prompt>`;
+
+        // Write payload for background worker
+        if (!fs.existsSync(TEMP_STATE_DIR)) {
+          fs.mkdirSync(TEMP_STATE_DIR, { recursive: true });
+        }
+        const payloadFile = path.join(TEMP_STATE_DIR, `prompt-${sessionId}-${Date.now()}.json`);
+        
+        const payload = {
+          apiKey,
+          conversationId: convId,
+          sessionId,
+          message: promptMessage,
+          stateFile: getSyncStateFile(cwd, sessionId),
+          newLastProcessedIndex: transcriptLength > 0 ? transcriptLength - 1 : 0,
+        };
+        fs.writeFileSync(payloadFile, JSON.stringify(payload), 'utf-8');
+        
+        // Spawn background worker
+        const workerScript = path.join(__dirname, 'send_worker.ts');
+        const child = spawn('npx', ['tsx', workerScript, payloadFile], {
+          detached: true,
+          stdio: 'ignore',
+          cwd,
+          env: process.env,
+        });
+        child.unref();
+      } catch (promptError) {
+        // Don't fail the sync if prompt sending fails - just log warning
+        console.error(`Warning: Failed to send prompt to Letta: ${promptError}`);
+      }
+    }
+    
+    // Save state
+    if (state && sessionId) {
+      saveSyncState(cwd, state);
+    }
     
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
