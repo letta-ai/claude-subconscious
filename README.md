@@ -267,6 +267,42 @@ architecture holistically rather than fixing point issues.
 </letta_message>
 ```
 
+### Memory Updates
+
+When memory blocks change between prompts, Claude sees a diff showing what changed:
+
+```xml
+<letta_memory_update>
+<!-- Memory blocks updated since last prompt (showing diff) -->
+<pending_items status="modified">
+- EVAL INFRASTRUCTURE (from 2026-01-19):
+-   Phase 1 test harness complete
+-   Scenarios ready: preference_evolution, conflicting_signals
++ RELEASE STATUS (2026-01-26):
++   Release prep complete: README fixed, .gitignore updated
++   Plugin ready for public release
+</pending_items>
+</letta_memory_update>
+```
+
+This keeps token usage reasonable even with large memory stores - Claude sees *what changed*, not the full block every time.
+
+### Async Messages
+
+The agent can send multiple messages between prompts:
+
+```xml
+<letta_message from="Subconscious" timestamp="2026-01-26T20:37:14+00:00">
+Clean execution. You caught everything:
+- README build step removed
+- .gitignore comprehensive
+
+Cameron's in ship mode. Next prompt likely involves GitHub push.
+</letta_message>
+```
+
+These messages appear before each user prompt, giving Claude context from the agent's observations.
+
 ## First Run
 
 On first use, the agent starts with minimal context. It takes a few sessions before the subconscious has enough signal to provide useful guidance. Give it time - it gets smarter as it observes more.
