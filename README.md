@@ -110,16 +110,18 @@ The default agent acts as a persistent memory layer that:
 
 ### Memory Blocks
 
-The agent maintains several memory blocks:
+The agent maintains 8 memory blocks:
 
 | Block | Purpose |
 |-------|---------|
 | `core_directives` | Role definition and behavioral guidelines |
-| `guidance` | Active guidance for the next session (this is what you see in `<letta_message>`) |
+| `guidance` | Active guidance for the next session (syncs to Claude Code before each prompt) |
 | `user_preferences` | Learned coding style, tool preferences, communication style |
 | `project_context` | Codebase knowledge, architecture decisions, known gotchas |
-| `session_patterns` | Recurring behaviors, common struggles |
-| `pending_items` | Unfinished work, explicit TODOs |
+| `session_patterns` | Recurring behaviors, time-based patterns, common struggles |
+| `pending_items` | Unfinished work, explicit TODOs, follow-up items |
+| `self_improvement` | Guidelines for evolving memory architecture over time |
+| `tool_guidelines` | How to use available tools (memory, search, web) |
 
 ### Communication Style
 
