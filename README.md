@@ -4,6 +4,8 @@ A subconscious for Claude Code.
 
 A [Letta](https://letta.com) agent watches your sessions, accumulates context, and provides async guidance.
 
+![evil claude](assets/evil-claude.jpeg)
+
 ## What Is This?
 
 Claude Code forgets everything between sessions. Claude Subconscious adds a persistent memory layer underneath:
@@ -15,6 +17,8 @@ Claude Code forgets everything between sessions. Claude Subconscious adds a pers
 Letta agents learn from input and can be customized to store specific information, run tool calls, perform background research, or take autonomous actions. Using Letta's [Conversations](https://docs.letta.com/guides/agents/conversations/) feature, a single agent can serve multiple Claude Code sessions in parallel with shared memory across all of them.
 
 ## How It Works
+
+Letta does simple management of your `CLAUDE.md` file, and injects some content into user prompts. Your Claude Code transcript will be send to the subconscious agent each time Claude stops.
 
 ```
 ┌─────────────┐          ┌─────────────┐
