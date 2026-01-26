@@ -70,6 +70,17 @@ Or enable globally for all projects:
 /plugin enable --global /path/to/claude-subconscious
 ```
 
+### Linux: tmpfs Workaround
+
+If plugin installation fails with `EXDEV: cross-device link not permitted`, your `/tmp` is likely on a different filesystem (common on Ubuntu, Fedora, Arch). Set `TMPDIR` to work around this [Claude Code bug](https://github.com/anthropics/claude-code/issues/14799):
+
+```bash
+mkdir -p ~/.claude/tmp
+export TMPDIR="$HOME/.claude/tmp"
+```
+
+Add to your shell profile (`~/.bashrc` or `~/.zshrc`) to make permanent.
+
 ## Configuration
 
 ### Required
