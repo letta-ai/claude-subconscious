@@ -57,18 +57,19 @@ cd claude-subconscious
 npm install
 ```
 
-Enable the plugin in your project:
+Enable the plugin (from inside the cloned directory):
 
-```bash
-cd /path/to/your/project
-/plugin enable /path/to/claude-subconscious
+```
+/plugin enable .
 ```
 
 Or enable globally for all projects:
 
-```bash
-/plugin enable --global /path/to/claude-subconscious
 ```
+/plugin enable --global .
+```
+
+If running from a different directory, use the full path to the cloned repo.
 
 ### Linux: tmpfs Workaround
 
