@@ -44,7 +44,14 @@ Install from GitHub:
 
 ```
 /plugin marketplace add letta-ai/claude-subconscious
-/plugin install claude-subconscious@letta-ai-claude-subconscious
+/plugin install claude-subconscious@claude-subconscious
+```
+
+### Updating
+
+```
+/plugin marketplace update
+/plugin update claude-subconscious@claude-subconscious
 ```
 
 ### Install from Source
