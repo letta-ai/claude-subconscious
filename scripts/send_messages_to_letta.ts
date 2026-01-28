@@ -41,6 +41,9 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Windows compatibility: npx needs to be npx.cmd on Windows
+const NPX_CMD = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+
 // Configuration
 const TEMP_STATE_DIR = '/tmp/letta-claude-sync';  // Temp state (logs, etc.)
 const LOG_FILE = path.join(TEMP_STATE_DIR, 'send_messages.log');
@@ -580,7 +583,7 @@ Write your response as if speaking directly to Claude Code.
 
     // Spawn worker as detached background process
     const workerScript = path.join(__dirname, 'send_worker.ts');
-    const child = spawn('npx', ['tsx', workerScript, payloadFile], {
+    const child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
       detached: true,
       stdio: 'ignore',
       cwd: hookInput.cwd,
