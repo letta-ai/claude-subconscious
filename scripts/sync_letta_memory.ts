@@ -380,6 +380,12 @@ async function main(): Promise<void> {
     const messageOutput = formatMessagesForStdout(agent, newMessages);
     outputs.push(messageOutput);
     
+    // Add instruction to acknowledge messages if there are any
+    if (newMessages.length > 0) {
+      const agentName = agent.name || 'Subconscious';
+      outputs.push(`<instruction>Your Subconscious (${agentName}) sent you a message above. Briefly acknowledge what ${agentName} said - just a short note like "Sub notes: [key point]" so the user knows.</instruction>`);
+    }
+    
     console.log(outputs.join('\n\n'));
     
     // Send user prompt to Letta early (gives Letta a head start while Claude processes)
