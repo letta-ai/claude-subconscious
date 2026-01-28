@@ -26,6 +26,45 @@ interface Config {
 }
 
 /**
+ * Regex for validating Letta agent ID format
+ * Format: agent-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (UUID v4 with 'agent-' prefix)
+ */
+const AGENT_ID_REGEX = /^agent-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Validate agent ID format
+ * 
+ * @param agentId - The agent ID to validate
+ * @returns true if valid, false otherwise
+ */
+export function isValidAgentId(agentId: string): boolean {
+  return AGENT_ID_REGEX.test(agentId);
+}
+
+/**
+ * Get a helpful error message for invalid agent ID format
+ */
+function getInvalidAgentIdMessage(agentId: string): string {
+  const lines = [
+    `Invalid LETTA_AGENT_ID format: "${agentId}"`,
+    '',
+    'The agent ID must be a UUID with the "agent-" prefix.',
+    'Expected format: agent-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+    'Example: agent-a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    '',
+    'Common mistakes:',
+    '  - Using the agent\'s friendly name (e.g., "Memo") instead of the UUID',
+    '  - Missing the "agent-" prefix',
+    '',
+    'To find your agent ID:',
+    '  1. Go to https://app.letta.com',
+    '  2. Select your agent',
+    '  3. Copy the ID from the URL or agent settings',
+  ];
+  return lines.join('\n');
+}
+
+/**
  * Read saved config
  */
 function readConfig(): Config {
@@ -139,6 +178,12 @@ export async function getAgentId(apiKey: string, log: (msg: string) => void = co
   // 1. Check environment variable
   const envAgentId = process.env.LETTA_AGENT_ID;
   if (envAgentId) {
+    // Validate format before using
+    if (!isValidAgentId(envAgentId)) {
+      const errorMsg = getInvalidAgentIdMessage(envAgentId);
+      log(`WARNING: ${errorMsg}`);
+      throw new Error(errorMsg);
+    }
     log(`Using agent ID from LETTA_AGENT_ID: ${envAgentId}`);
     return envAgentId;
   }
@@ -146,8 +191,15 @@ export async function getAgentId(apiKey: string, log: (msg: string) => void = co
   // 2. Check saved config
   const config = readConfig();
   if (config.agentId) {
-    log(`Using saved agent ID: ${config.agentId}`);
-    return config.agentId;
+    // Validate saved config (in case it was manually edited or corrupted)
+    if (!isValidAgentId(config.agentId)) {
+      log(`WARNING: Saved agent ID has invalid format: ${config.agentId}`);
+      log(`Ignoring invalid saved config and attempting to import default agent...`);
+      // Fall through to import default agent
+    } else {
+      log(`Using saved agent ID: ${config.agentId}`);
+      return config.agentId;
+    }
   }
   
   // 3. Import default agent
