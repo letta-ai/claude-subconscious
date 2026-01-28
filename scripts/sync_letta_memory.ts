@@ -36,6 +36,9 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Windows compatibility: npx needs to be npx.cmd on Windows
+const NPX_CMD = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+
 // Configuration
 const LETTA_BASE_URL = process.env.LETTA_BASE_URL || 'https://api.letta.com';
 const LETTA_API_BASE = `${LETTA_BASE_URL}/v1`;
@@ -597,7 +600,7 @@ async function main(): Promise<void> {
         
         // Spawn background worker
         const workerScript = path.join(__dirname, 'send_worker.ts');
-        const child = spawn('npx', ['tsx', workerScript, payloadFile], {
+        const child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
           detached: true,
           stdio: 'ignore',
           cwd,
