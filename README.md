@@ -1,8 +1,11 @@
 # Claude Subconscious
 
-A subconscious for Claude Code.
+A subconscious for Claude Code. A [Letta](https://letta.com) agent that watches your sessions, accumulates context, and provides async guidance to "main Claude".
 
-A [Letta](https://letta.com) agent watches your sessions, accumulates context, and provides async guidance.
+> [!IMPORTANT]
+> Claude Subconcious is an experimental way to extend Claude Code (a closed source / black box agent) with the power of Letta's memory system and context engineering.
+>
+> If you're looking for a coding agent that's memory-first, model agnostic, and fully open source, we recommend using [**Letta Code**](https://github.com/letta-ai/letta-code).
 
 ![evil claude](assets/evil-claude.jpeg)
 
