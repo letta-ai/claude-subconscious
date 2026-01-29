@@ -5,6 +5,11 @@
  * 1. LETTA_AGENT_ID environment variable
  * 2. Saved config file (~/.letta/claude-subconscious/config.json)
  * 3. Auto-import from bundled Subconscious.af
+ * 
+ * Model configuration:
+ * - After agent creation, checks if the agent's model is available
+ * - If not available, auto-selects from available models with preference order
+ * - LETTA_MODEL environment variable can override (if available on server)
  */
 
 import * as fs from 'fs';
@@ -20,9 +25,37 @@ const CONFIG_DIR = path.join(process.env.HOME || '~', '.letta', 'claude-subconsc
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 const DEFAULT_AGENT_FILE = path.join(__dirname, '..', 'Subconscious.af');
 
+// Preferred models in order of preference for auto-selection
+const PREFERRED_MODELS = [
+  'openai/gpt-4o-mini',
+  'openai/gpt-4o',
+  'anthropic/claude-3-5-sonnet',
+  'anthropic/claude-3-haiku',
+  'google_ai/gemini-2.0-flash',
+];
+
 interface Config {
   agentId?: string;
   importedAt?: string;
+  model?: string; // Track which model was configured
+}
+
+interface LettaModel {
+  model: string;
+  name: string;
+  provider_type: string;
+  handle?: string;
+  display_name?: string;
+}
+
+interface AgentDetails {
+  id: string;
+  name: string;
+  llm_config?: {
+    model?: string;
+    handle?: string;
+    provider_name?: string;
+  };
 }
 
 /**
@@ -126,6 +159,204 @@ async function renameAgent(apiKey: string, agentId: string, name: string): Promi
 }
 
 /**
+ * List available models from Letta server
+ */
+async function listAvailableModels(apiKey: string): Promise<LettaModel[]> {
+  const url = `${LETTA_API_BASE}/models/`;
+  
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to list models: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Get agent details including current model configuration
+ */
+async function getAgentDetails(apiKey: string, agentId: string): Promise<AgentDetails> {
+  const url = `${LETTA_API_BASE}/agents/${agentId}`;
+  
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to get agent details: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Get model handle from agent details
+ * The handle format is "provider/model" (e.g., "openai/gpt-4o-mini")
+ */
+function getAgentModelHandle(agent: AgentDetails): string | null {
+  const llmConfig = agent.llm_config;
+  if (!llmConfig) return null;
+  
+  // Try handle first (newer format)
+  if (llmConfig.handle) return llmConfig.handle;
+  
+  // Fall back to constructing from provider and model
+  if (llmConfig.provider_name && llmConfig.model) {
+    return `${llmConfig.provider_name}/${llmConfig.model}`;
+  }
+  
+  return llmConfig.model || null;
+}
+
+/**
+ * Check if a model is available on the server
+ */
+function isModelAvailable(models: LettaModel[], modelHandle: string): boolean {
+  // Model handles are in format "provider/model"
+  // The API returns models with various formats, so we check multiple fields
+  const normalizedHandle = modelHandle.toLowerCase();
+  
+  return models.some(m => {
+    const handle = m.handle?.toLowerCase() || `${m.provider_type}/${m.model}`.toLowerCase();
+    return handle === normalizedHandle || 
+           m.model?.toLowerCase() === normalizedHandle ||
+           `${m.provider_type}/${m.name}`.toLowerCase() === normalizedHandle;
+  });
+}
+
+/**
+ * Select best available model from preferences
+ */
+function selectBestModel(models: LettaModel[], preferences: string[]): string | null {
+  // First, try preferred models in order
+  for (const preferred of preferences) {
+    if (isModelAvailable(models, preferred)) {
+      return preferred;
+    }
+  }
+  
+  // Fall back to first available model
+  if (models.length > 0) {
+    const first = models[0];
+    return first.handle || `${first.provider_type}/${first.model}`;
+  }
+  
+  return null;
+}
+
+/**
+ * Ensure agent's model is available on the server
+ * If not, auto-select from available models and update the agent
+ * 
+ * @returns The model handle that was configured (or null if no change needed)
+ */
+async function ensureModelAvailable(
+  apiKey: string,
+  agentId: string,
+  log: (msg: string) => void = console.log
+): Promise<string | null> {
+  try {
+    // Get available models and agent details in parallel
+    const [models, agent] = await Promise.all([
+      listAvailableModels(apiKey),
+      getAgentDetails(apiKey, agentId),
+    ]);
+    
+    const currentModel = getAgentModelHandle(agent);
+    log(`Agent's current model: ${currentModel || 'unknown'}`);
+    log(`Available models: ${models.length} found`);
+    
+    // Check if LETTA_MODEL env var is set
+    const envModel = process.env.LETTA_MODEL;
+    if (envModel) {
+      if (isModelAvailable(models, envModel)) {
+        if (currentModel !== envModel) {
+          log(`Using LETTA_MODEL override: ${envModel}`);
+          await updateAgentModel(apiKey, agentId, envModel, log);
+          return envModel;
+        }
+        return null; // Already using desired model
+      } else {
+        log(`Warning: LETTA_MODEL="${envModel}" is not available on this server`);
+        log(`Available models: ${models.map(m => m.handle || `${m.provider_type}/${m.model}`).slice(0, 10).join(', ')}${models.length > 10 ? '...' : ''}`);
+      }
+    }
+    
+    // Check if current model is available
+    if (currentModel && isModelAvailable(models, currentModel)) {
+      log(`Agent's model "${currentModel}" is available`);
+      return null; // No change needed
+    }
+    
+    // Model not available - need to select alternative
+    log(`Agent's model "${currentModel}" is NOT available on this server`);
+    
+    const selectedModel = selectBestModel(models, PREFERRED_MODELS);
+    if (!selectedModel) {
+      throw new Error('No models available on this server. Please configure your Letta server with at least one LLM provider.');
+    }
+    
+    log(`Auto-selecting model: ${selectedModel}`);
+    console.log(`\n⚠️  Model Update Required`);
+    console.log(`   The Subconscious agent's default model (${currentModel}) is not available.`);
+    console.log(`   Auto-selecting: ${selectedModel}`);
+    console.log(`   To use a different model, set LETTA_MODEL environment variable.\n`);
+    
+    await updateAgentModel(apiKey, agentId, selectedModel, log);
+    return selectedModel;
+    
+  } catch (error) {
+    // Log but don't fail - the agent might still work
+    log(`Warning: Could not verify model availability: ${error}`);
+    return null;
+  }
+}
+
+/**
+ * Update agent's model configuration
+ * 
+ * @param apiKey - Letta API key
+ * @param agentId - Agent ID to update
+ * @param modelHandle - Model handle (e.g., "openai/gpt-4o-mini", "anthropic/claude-3-5-sonnet")
+ * @param log - Logging function
+ */
+async function updateAgentModel(
+  apiKey: string,
+  agentId: string,
+  modelHandle: string,
+  log: (msg: string) => void = console.log
+): Promise<void> {
+  const url = `${LETTA_API_BASE}/agents/${agentId}`;
+  
+  log(`Updating agent model to: ${modelHandle}`);
+  
+  const response = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ model: modelHandle }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to update agent model: ${response.status} ${errorText}`);
+  }
+  
+  log(`Agent model updated to: ${modelHandle}`);
+}
+
+/**
  * Import agent from .af file
  */
 async function importDefaultAgent(apiKey: string): Promise<string> {
@@ -172,9 +403,13 @@ async function importDefaultAgent(apiKey: string): Promise<string> {
 /**
  * Get or create agent ID
  * 
- * Returns the agent ID from env var, saved config, or imports the default agent
+ * Returns the agent ID from env var, saved config, or imports the default agent.
+ * After getting the agent, verifies the model is available and auto-selects if not.
  */
 export async function getAgentId(apiKey: string, log: (msg: string) => void = console.log): Promise<string> {
+  let agentId: string;
+  let config = readConfig();
+  
   // 1. Check environment variable
   const envAgentId = process.env.LETTA_AGENT_ID;
   if (envAgentId) {
@@ -185,24 +420,49 @@ export async function getAgentId(apiKey: string, log: (msg: string) => void = co
       throw new Error(errorMsg);
     }
     log(`Using agent ID from LETTA_AGENT_ID: ${envAgentId}`);
-    return envAgentId;
+    agentId = envAgentId;
   }
-  
   // 2. Check saved config
-  const config = readConfig();
-  if (config.agentId) {
+  else if (config.agentId) {
     // Validate saved config (in case it was manually edited or corrupted)
     if (!isValidAgentId(config.agentId)) {
       log(`WARNING: Saved agent ID has invalid format: ${config.agentId}`);
       log(`Ignoring invalid saved config and attempting to import default agent...`);
       // Fall through to import default agent
+      agentId = await importAndSaveAgent(apiKey, log);
+      config = readConfig(); // Reload config after import
     } else {
       log(`Using saved agent ID: ${config.agentId}`);
-      return config.agentId;
+      agentId = config.agentId;
     }
   }
-  
   // 3. Import default agent
+  else {
+    agentId = await importAndSaveAgent(apiKey, log);
+    config = readConfig(); // Reload config after import
+  }
+  
+  // 4. Ensure model is available (auto-select if not)
+  try {
+    const configuredModel = await ensureModelAvailable(apiKey, agentId, log);
+    if (configuredModel && config.model !== configuredModel) {
+      // Update saved config with the model that was configured
+      saveConfig({
+        ...config,
+        model: configuredModel,
+      });
+    }
+  } catch (error) {
+    log(`Warning: Could not verify model availability: ${error}`);
+  }
+  
+  return agentId;
+}
+
+/**
+ * Import default agent and save to config
+ */
+async function importAndSaveAgent(apiKey: string, log: (msg: string) => void): Promise<string> {
   log('No agent configured - importing default Subconscious agent...');
   
   if (!fs.existsSync(DEFAULT_AGENT_FILE)) {
