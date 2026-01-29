@@ -107,7 +107,7 @@ Get your API key from [app.letta.com](https://app.letta.com).
 ```bash
 export LETTA_AGENT_ID="agent-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 export LETTA_BASE_URL="http://localhost:8283"  # For self-hosted Letta
-export LETTA_MODEL="openai/gpt-4o-mini"        # Model override
+export LETTA_MODEL="anthropic/claude-sonnet-4-5"  # Model override
 ```
 
 - `LETTA_AGENT_ID` - If not set, the plugin automatically imports a default "Subconscious" agent on first use.
@@ -133,28 +133,29 @@ The plugin **automatically detects available models** on your Letta server and c
 #### Auto-Selection Priority
 
 When the agent's model isn't available, the plugin selects from available models in this order:
-1. `openai/gpt-4o-mini` (recommended - fast and cost-effective)
-2. `openai/gpt-4o`
-3. `anthropic/claude-3-5-sonnet`
-4. `anthropic/claude-3-haiku`
-5. `google_ai/gemini-2.0-flash`
-6. First available model on the server
+1. `anthropic/claude-sonnet-4-5` (recommended - best for agents)
+2. `openai/gpt-4.1-mini` (good balance, 1M context, cheap)
+3. `anthropic/claude-haiku-4-5` (fast Claude option)
+4. `openai/gpt-5.2` (flagship fallback)
+5. `google_ai/gemini-3-flash` (Google's balanced option)
+6. `google_ai/gemini-2.5-flash` (fallback)
+7. First available model on the server
 
 #### Manual Override
 
 To specify a particular model, set `LETTA_MODEL`:
 
 ```bash
-export LETTA_MODEL="openai/gpt-4o-mini"
+export LETTA_MODEL="anthropic/claude-sonnet-4-5"
 ```
 
 The model handle format is `provider/model`. Common options:
 
 | Provider | Example Models |
 |----------|----------------|
-| `openai` | `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo` |
-| `anthropic` | `claude-3-5-sonnet`, `claude-3-opus`, `claude-3-haiku` |
-| `google_ai` | `gemini-2.0-flash`, `gemini-1.5-pro` |
+| `openai` | `gpt-5.2`, `gpt-5-nano`, `gpt-4.1-mini` |
+| `anthropic` | `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-haiku-4-5` |
+| `google_ai` | `gemini-3-flash`, `gemini-2.5-flash`, `gemini-2.5-pro` |
 | `zai` | `glm-4.7` (Letta Cloud default) |
 
 If `LETTA_MODEL` is set but not available on the server, the plugin will warn you and fall back to auto-selection.
