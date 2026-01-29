@@ -583,11 +583,14 @@ Write your response as if speaking directly to Claude Code.
 
     // Spawn worker as detached background process
     const workerScript = path.join(__dirname, 'send_worker.ts');
+    const isWindows = process.platform === 'win32';
     const child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
       detached: true,
       stdio: 'ignore',
       cwd: hookInput.cwd,
       env: process.env,
+      // Windows requires shell: true for detached processes to work properly
+      ...(isWindows && { shell: true, windowsHide: true }),
     });
     child.unref();
     log(`Spawned background worker (PID: ${child.pid})`);

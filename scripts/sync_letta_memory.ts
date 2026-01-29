@@ -424,11 +424,14 @@ async function main(): Promise<void> {
         
         // Spawn background worker
         const workerScript = path.join(__dirname, 'send_worker.ts');
+        const isWindows = process.platform === 'win32';
         const child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
           detached: true,
           stdio: 'ignore',
           cwd,
           env: process.env,
+          // Windows requires shell: true for detached processes to work properly
+          ...(isWindows && { shell: true, windowsHide: true }),
         });
         child.unref();
       } catch (promptError) {
