@@ -439,7 +439,8 @@ ${LETTA_SECTION_END}`;
  * Update CLAUDE.md with the new Letta memory section
  */
 export function updateClaudeMd(projectDir: string, lettaContent: string): void {
-  const claudeMdPath = path.join(projectDir, CLAUDE_MD_PATH);
+  const claudeMdPath = process.env.LETTA_CLAUDE_MD_PATH
+    || path.join(projectDir, CLAUDE_MD_PATH);
 
   let existingContent = '';
 

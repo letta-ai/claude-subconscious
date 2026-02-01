@@ -108,11 +108,13 @@ Get your API key from [app.letta.com](https://app.letta.com).
 export LETTA_AGENT_ID="agent-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 export LETTA_BASE_URL="http://localhost:8283"  # For self-hosted Letta
 export LETTA_MODEL="anthropic/claude-sonnet-4-5"  # Model override
+export LETTA_CLAUDE_MD_PATH="$HOME/.claude/CLAUDE.md"  # Single global file location
 ```
 
 - `LETTA_AGENT_ID` - If not set, the plugin automatically imports a default "Subconscious" agent on first use.
 - `LETTA_BASE_URL` - For self-hosted Letta servers. Defaults to `https://api.letta.com`.
 - `LETTA_MODEL` - Override the agent's model. Optional - the plugin auto-detects and selects from available models. See [Model Configuration](#model-configuration) below.
+- `LETTA_CLAUDE_MD_PATH` - Override where CLAUDE.md is written. Defaults to `.claude/CLAUDE.md` in the current directory. Set to a single global path (e.g., `$HOME/.claude/CLAUDE.md`) to avoid file proliferation across directories when the plugin is globally enabled.
 
 ### Agent Resolution Order
 
