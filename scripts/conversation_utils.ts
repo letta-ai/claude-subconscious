@@ -22,6 +22,23 @@ const LETTA_CONTEXT_END = '</letta_context>';
 const LETTA_MEMORY_START = '<letta_memory_blocks>';
 const LETTA_MEMORY_END = '</letta_memory_blocks>';
 
+// ============================================
+// Mode Configuration
+// ============================================
+
+export type LettaMode = 'whisper' | 'off';
+
+/**
+ * Get the current operating mode from LETTA_MODE env var.
+ * - whisper (default): All content via stdout injection, no CLAUDE.md writes
+ * - off: Disable all hooks
+ */
+export function getMode(): LettaMode {
+  const mode = process.env.LETTA_MODE?.toLowerCase();
+  if (mode === 'off') return 'off';
+  return 'whisper';
+}
+
 // Types
 export interface SyncState {
   lastProcessedIndex: number;
@@ -480,4 +497,86 @@ export function updateClaudeMd(projectDir: string, lettaContent: string): void {
   updatedContent = updatedContent.trimEnd() + '\n';
 
   fs.writeFileSync(claudeMdPath, updatedContent, 'utf-8');
+}
+
+/**
+ * Remove all Letta content from CLAUDE.md (for whisper mode cleanup).
+ * If the file was entirely created by us, delete it.
+ */
+export function cleanLettaFromClaudeMd(projectDir: string): void {
+  const base = process.env.LETTA_PROJECT || projectDir;
+  const claudeMdPath = path.join(base, CLAUDE_MD_PATH);
+
+  if (!fs.existsSync(claudeMdPath)) {
+    return;
+  }
+
+  const content = fs.readFileSync(claudeMdPath, 'utf-8');
+  const lettaPattern = `^${escapeRegex(LETTA_SECTION_START)}[\\s\\S]*?^${escapeRegex(LETTA_SECTION_END)}\\n*`;
+  const lettaRegex = new RegExp(lettaPattern, 'gm');
+
+  if (!lettaRegex.test(content)) {
+    return;
+  }
+
+  lettaRegex.lastIndex = 0;
+  let cleaned = content.replace(lettaRegex, '');
+
+  // Also clean orphaned letta_message blocks
+  const messagePattern = /^<letta_message>[\s\S]*?^<\/letta_message>\n*/gm;
+  cleaned = cleaned.replace(messagePattern, '');
+
+  // Clean up the auto-generated boilerplate we created
+  cleaned = cleaned.replace(/<!-- Letta agent memory is automatically synced below -->\n*/g, '');
+  cleaned = cleaned.replace(/^# Project Context\n*/gm, '');
+
+  cleaned = cleaned.trim();
+
+  if (cleaned.length === 0) {
+    // File was entirely ours — delete it
+    fs.unlinkSync(claudeMdPath);
+  } else {
+    // User had their own content — just write back without our stuff
+    fs.writeFileSync(claudeMdPath, cleaned + '\n', 'utf-8');
+  }
+}
+
+/**
+ * Format all memory blocks for stdout injection (whisper mode, first prompt)
+ */
+export function formatAllBlocksForStdout(agent: Agent, conversationId: string | null): string {
+  const agentName = agent.name || 'Unnamed Agent';
+  const blocks = agent.blocks;
+
+  // Build agent info header
+  let locationInfo: string;
+  if (IS_HOSTED) {
+    const conversationUrl = conversationId
+      ? `${LETTA_APP_BASE}/agents/${agent.id}?conversation=${conversationId}`
+      : `${LETTA_APP_BASE}/agents/${agent.id}`;
+    locationInfo = `Supervise: ${conversationUrl}`;
+  } else {
+    locationInfo = `Agent ID: ${agent.id}${conversationId ? `, Conversation: ${conversationId}` : ''}`;
+  }
+
+  const header = `<letta_context>
+Subconscious agent "${agentName}" is observing this session.
+${locationInfo}
+</letta_context>`;
+
+  if (!blocks || blocks.length === 0) {
+    return header;
+  }
+
+  const formattedBlocks = blocks.map(block => {
+    const escapedDescription = escapeXmlAttribute(block.description || '');
+    const escapedContent = escapeXmlContent(block.value || '');
+    return `<${block.label} description="${escapedDescription}">\n${escapedContent}\n</${block.label}>`;
+  }).join('\n');
+
+  return `${header}
+
+<letta_memory_blocks>
+${formattedBlocks}
+</letta_memory_blocks>`;
 }

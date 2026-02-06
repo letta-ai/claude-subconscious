@@ -105,6 +105,7 @@ Get your API key from [app.letta.com](https://app.letta.com).
 ### Optional
 
 ```bash
+export LETTA_MODE="whisper"    # Default. Set to "off" to disable
 export LETTA_AGENT_ID="agent-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 export LETTA_BASE_URL="http://localhost:8283"  # For self-hosted Letta
 export LETTA_MODEL="anthropic/claude-sonnet-4-5"  # Model override
@@ -112,11 +113,21 @@ export LETTA_HOME="$HOME"      # Consolidate .letta state to ~/.letta/
 export LETTA_PROJECT="$HOME"   # Consolidate CLAUDE.md to ~/.claude/CLAUDE.md
 ```
 
+- `LETTA_MODE` - Set to `off` to disable all hooks. Defaults to `whisper` (stdout injection). See [Modes](#modes) below.
 - `LETTA_AGENT_ID` - If not set, the plugin automatically imports a default "Subconscious" agent on first use.
 - `LETTA_BASE_URL` - For self-hosted Letta servers. Defaults to `https://api.letta.com`.
 - `LETTA_MODEL` - Override the agent's model. Optional - the plugin auto-detects and selects from available models. See [Model Configuration](#model-configuration) below.
 - `LETTA_HOME` - Base directory for plugin state files. Creates `{LETTA_HOME}/.letta/claude/` for session data and conversation mappings. Defaults to current working directory. Set to `$HOME` to consolidate all state in one location.
-- `LETTA_PROJECT` - Base directory for CLAUDE.md. Creates `{LETTA_PROJECT}/.claude/CLAUDE.md` for memory blocks. Defaults to current project directory. Set to `$HOME` to use a single global file that Claude Code discovers via path-walking.
+### Modes
+
+The `LETTA_MODE` environment variable controls the plugin:
+
+| Mode | Behavior |
+|------|----------|
+| **`whisper`** (default) | Full blocks on first prompt, diffs + messages after. Never writes to CLAUDE.md. |
+| **`off`** | Disable all hooks. Agent still exists but won't observe or inject anything. |
+
+Subconscious **never writes to CLAUDE.md**. All memory is injected via stdout into the prompt context. If you have an existing CLAUDE.md with `<letta>` content from an older version, it will be cleaned up automatically.
 
 ### Agent Resolution Order
 

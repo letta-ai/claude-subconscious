@@ -1,6 +1,6 @@
 {
   "name": "claude-subconscious",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "A subconscious for Claude Code. A Letta agent watches your sessions, accumulates context, and whispers guidance back.",
   "author": "Letta <hello@letta.com> (https://letta.com)",
   "license": "MIT",

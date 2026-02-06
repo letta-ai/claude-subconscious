@@ -25,10 +25,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getAgentId } from './agent_config.js';
 import {
-  fetchAgent,
-  formatMemoryBlocksAsXml,
-  updateClaudeMd,
+  cleanLettaFromClaudeMd,
   createConversation,
+  getMode,
 } from './conversation_utils.js';
 
 // Configuration
@@ -225,6 +224,13 @@ async function main(): Promise<void> {
   log('='.repeat(60));
   log('session_start.ts started');
 
+  const mode = getMode();
+  log(`Mode: ${mode}`);
+  if (mode === 'off') {
+    log('Mode is off, exiting');
+    process.exit(0);
+  }
+
   const apiKey = process.env.LETTA_API_KEY;
 
   if (!apiKey) {
@@ -282,12 +288,10 @@ async function main(): Promise<void> {
     // Save session state
     saveSessionState(hookInput.cwd, hookInput.session_id, conversationId);
 
-    // Sync memory to CLAUDE.md immediately so Claude has fresh agent/conversation IDs
-    log('Syncing memory to CLAUDE.md...');
-    const agent = await fetchAgent(apiKey, agentId);
-    const lettaContent = formatMemoryBlocksAsXml(agent, conversationId);
-    updateClaudeMd(hookInput.cwd, lettaContent);
-    log('Memory synced to CLAUDE.md');
+    // Clean up any existing <letta> section from CLAUDE.md (legacy migration)
+    log('Cleaning up any legacy CLAUDE.md content...');
+    cleanLettaFromClaudeMd(hookInput.cwd);
+    log('CLAUDE.md cleanup done');
 
     // Send session start message
     await sendSessionStartMessage(apiKey, conversationId, hookInput.session_id, hookInput.cwd);

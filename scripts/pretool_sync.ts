@@ -22,6 +22,7 @@ import {
   saveSyncState,
   lookupConversation,
   SyncState,
+  getMode,
   LETTA_API_BASE,
 } from './conversation_utils.js';
 
@@ -251,6 +252,11 @@ function formatOutput(
  * Main function
  */
 async function main(): Promise<void> {
+  const mode = getMode();
+  if (mode === 'off') {
+    process.exit(0);
+  }
+
   const apiKey = process.env.LETTA_API_KEY;
   
   if (!apiKey) {

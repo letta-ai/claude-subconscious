@@ -34,8 +34,9 @@ import {
   MemoryBlock,
   fetchAgent,
   escapeXmlContent,
-  formatMemoryBlocksAsXml,
-  updateClaudeMd,
+  formatAllBlocksForStdout,
+  cleanLettaFromClaudeMd,
+  getMode,
   LETTA_API_BASE,
 } from './conversation_utils.js';
 
@@ -301,6 +302,12 @@ ${msg.text}
  * Main function
  */
 async function main(): Promise<void> {
+  // Check mode
+  const mode = getMode();
+  if (mode === 'off') {
+    process.exit(0);
+  }
+
   // Get environment variables
   const apiKey = process.env.LETTA_API_KEY;
   const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
@@ -348,11 +355,8 @@ async function main(): Promise<void> {
     // Detect which blocks have changed since last sync
     const changedBlocks = detectChangedBlocks(agent.blocks || [], lastBlockValues);
     
-    // Format memory blocks as XML (includes context section)
-    const lettaContent = formatMemoryBlocksAsXml(agent, conversationId);
-    
-    // Update CLAUDE.md with full memory blocks
-    updateClaudeMd(cwd, lettaContent);
+    // Clean up any existing <letta> section from CLAUDE.md (legacy migration)
+    cleanLettaFromClaudeMd(cwd);
     
     // Update state with block values and last seen message ID
     if (state) {
@@ -370,10 +374,16 @@ async function main(): Promise<void> {
     // (UserPromptSubmit hooks add stdout to context)
     const outputs: string[] = [];
     
-    // Add changed blocks if any
-    const changedBlocksOutput = formatChangedBlocksForStdout(changedBlocks, lastBlockValues);
-    if (changedBlocksOutput) {
-      outputs.push(changedBlocksOutput);
+    // First prompt: inject all blocks + context. Subsequent: diffs only.
+    const isFirstPrompt = !lastBlockValues;
+    
+    if (isFirstPrompt) {
+      outputs.push(formatAllBlocksForStdout(agent, conversationId));
+    } else {
+      const changedBlocksOutput = formatChangedBlocksForStdout(changedBlocks, lastBlockValues);
+      if (changedBlocksOutput) {
+        outputs.push(changedBlocksOutput);
+      }
     }
     
     // Add all new messages from Sub

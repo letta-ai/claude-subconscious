@@ -35,6 +35,7 @@ import {
   getSyncStateFile,
   SyncState,
   LogFn,
+  getMode,
 } from './conversation_utils.js';
 
 // ESM-compatible __dirname
@@ -475,6 +476,13 @@ Write your response as if speaking directly to Claude Code.
 async function main(): Promise<void> {
   log('='.repeat(60));
   log('send_messages_to_letta.ts started');
+
+  const mode = getMode();
+  log(`Mode: ${mode}`);
+  if (mode === 'off') {
+    log('Mode is off, exiting');
+    process.exit(0);
+  }
   
   // Get environment variables
   const apiKey = process.env.LETTA_API_KEY;
