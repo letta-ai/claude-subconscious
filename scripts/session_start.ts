@@ -22,6 +22,7 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { getAgentId } from './agent_config.js';
 import {
@@ -291,6 +292,13 @@ async function main(): Promise<void> {
     // Clean up any existing <letta> section from CLAUDE.md (legacy migration)
     log('Cleaning up any legacy CLAUDE.md content...');
     cleanLettaFromClaudeMd(hookInput.cwd);
+
+    // Also clean the global ~/.claude/CLAUDE.md (may have bloat from pre-v1.3.0)
+    const homeDir = process.env.HOME || os.homedir();
+    if (homeDir !== hookInput.cwd) {
+      log('Cleaning up global ~/.claude/CLAUDE.md...');
+      cleanLettaFromClaudeMd(homeDir);
+    }
     log('CLAUDE.md cleanup done');
 
     // Send session start message
