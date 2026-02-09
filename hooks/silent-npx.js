@@ -8,7 +8,7 @@ const isWindows = process.platform === 'win32';
 const child = spawn('npx', process.argv.slice(2), {
   windowsHide: isWindows,  // Hide console window on Windows only
   stdio: 'inherit',        // Pass through stdout/stderr
-  shell: false
+  shell: isWindows         // Use shell on Windows to resolve npx.cmd
 });
 
 // Forward exit code
