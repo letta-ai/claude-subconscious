@@ -6,12 +6,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.js\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/session_start.ts\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/session_start.ts\"",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.js\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/sync_letta_memory.ts\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/sync_letta_memory.ts\"",
             "timeout": 10
           }
         ]
@@ -23,7 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.js\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/pretool_sync.ts\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/pretool_sync.ts\"",
             "timeout": 5
           }
         ]
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.js\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/sync_letta_memory.ts\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/sync_letta_memory.ts\"",
             "timeout": 10
           }
         ]
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.js\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/send_messages_to_letta.ts\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/send_messages_to_letta.ts\"",
             "timeout": 15
           }
         ]

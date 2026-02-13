@@ -216,7 +216,9 @@ async function fetchAssistantMessages(
     return { messages: [], lastMessageId: null };
   }
 
-  const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages?limit=50`;
+  // Use a high limit because Letta returns multiple entries per logical message
+  // (hidden_reasoning + assistant_message pairs), so limit=50 may not reach newest messages
+  const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages?limit=300`;
 
   const response = await fetch(url, {
     method: 'GET',
@@ -232,19 +234,22 @@ async function fetchAssistantMessages(
   }
 
   const allMessages: LettaMessage[] = await response.json();
-  debug(`Fetched ${allMessages.length} total messages from conversation`);
 
-  // Filter to assistant messages only
-  // NOTE: API returns messages newest-first
-  const assistantMessages = allMessages.filter(msg => msg.message_type === 'assistant_message');
-  debug(`Found ${assistantMessages.length} assistant messages`);
+  // Filter to assistant messages only, then sort by date descending (newest first)
+  // The API does NOT guarantee newest-first ordering — newer messages can appear at the end
+  const assistantMessages = allMessages
+    .filter(msg => msg.message_type === 'assistant_message')
+    .sort((a, b) => {
+      const da = a.date ? new Date(a.date).getTime() : 0;
+      const db = b.date ? new Date(b.date).getTime() : 0;
+      return db - da; // newest first
+    });
 
   // Find the index of the last seen message
   // Since messages are newest-first, new messages are BEFORE lastSeenIndex (indices 0 to lastSeenIndex-1)
   let endIndex = assistantMessages.length; // Default: return all messages
   if (lastSeenMessageId) {
     const lastSeenIndex = assistantMessages.findIndex(msg => msg.id === lastSeenMessageId);
-    debug(`lastSeenMessageId=${lastSeenMessageId}, lastSeenIndex=${lastSeenIndex}`);
     if (lastSeenIndex !== -1) {
       // Only return messages newer than the last seen one (before it in the array)
       endIndex = lastSeenIndex;
@@ -343,7 +348,7 @@ async function main(): Promise<void> {
     }
     const lastBlockValues = state?.lastBlockValues || null;
     const lastSeenMessageId = state?.lastSeenMessageId || null;
-    
+
     // Fetch agent data and messages in parallel
     const [agent, messagesResult] = await Promise.all([
       fetchAgent(apiKey, agentId),
@@ -351,7 +356,7 @@ async function main(): Promise<void> {
     ]);
     
     const { messages: newMessages, lastMessageId } = messagesResult;
-    
+
     // Detect which blocks have changed since last sync
     const changedBlocks = detectChangedBlocks(agent.blocks || [], lastBlockValues);
     
@@ -437,14 +442,53 @@ async function main(): Promise<void> {
         // Spawn background worker
         const workerScript = path.join(__dirname, 'send_worker.ts');
         const isWindows = process.platform === 'win32';
-        const child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
-          detached: true,
-          stdio: 'ignore',
-          cwd,
-          env: process.env,
-          // Windows requires shell: true for detached processes to work properly
-          ...(isWindows && { shell: true, windowsHide: true }),
-        });
+        let child;
+        if (isWindows) {
+          // On Windows, spawn workers through silent-launcher.exe (a winexe).
+          // detached:true is safe on a winexe (no console flash).
+          // The worker gets its own PseudoConsole, so it survives the main
+          // script's PseudoConsole being closed by the parent launcher.
+          const silentLauncher = path.join(__dirname, '..', 'hooks', 'silent-launcher.exe');
+          const tsxCli = path.join(__dirname, '..', 'node_modules', 'tsx', 'dist', 'cli.mjs');
+          // Clear SL_ env vars so the worker's launcher instance gets a clean slate
+          const workerEnv = { ...process.env };
+          delete workerEnv.SL_STDIN_FILE;
+          delete workerEnv.SL_STDOUT_FILE;
+
+          if (fs.existsSync(silentLauncher) && fs.existsSync(tsxCli)) {
+            child = spawn(silentLauncher, ['node', tsxCli, workerScript, payloadFile], {
+              detached: true,
+              stdio: 'ignore',
+              cwd,
+              env: workerEnv,
+              windowsHide: true,
+            });
+          } else if (fs.existsSync(tsxCli)) {
+            // Fallback: direct node (may be killed when PseudoConsole closes)
+            child = spawn(process.execPath, [tsxCli, workerScript, payloadFile], {
+              stdio: 'ignore',
+              cwd,
+              env: workerEnv,
+              windowsHide: true,
+            });
+          } else {
+            // Fallback: use npx through shell (may flash console window)
+            child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
+              stdio: 'ignore',
+              cwd,
+              env: workerEnv,
+              shell: true,
+              windowsHide: true,
+            });
+          }
+        } else {
+          child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
+            detached: true,
+            stdio: 'ignore',
+            cwd,
+            env: process.env,
+          });
+        }
         child.unref();
       } catch (promptError) {
         // Don't fail the sync if prompt sending fails - just log warning

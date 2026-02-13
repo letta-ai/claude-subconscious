@@ -592,14 +592,53 @@ Write your response as if speaking directly to Claude Code.
     // Spawn worker as detached background process
     const workerScript = path.join(__dirname, 'send_worker.ts');
     const isWindows = process.platform === 'win32';
-    const child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
-      detached: true,
-      stdio: 'ignore',
-      cwd: hookInput.cwd,
-      env: process.env,
-      // Windows requires shell: true for detached processes to work properly
-      ...(isWindows && { shell: true, windowsHide: true }),
-    });
+    let child;
+    if (isWindows) {
+      // On Windows, spawn workers through silent-launcher.exe (a winexe).
+      // detached:true is safe on a winexe (no console flash).
+      // The worker gets its own PseudoConsole, so it survives the main
+      // script's PseudoConsole being closed by the parent launcher.
+      const silentLauncher = path.join(__dirname, '..', 'hooks', 'silent-launcher.exe');
+      const tsxCli = path.join(__dirname, '..', 'node_modules', 'tsx', 'dist', 'cli.mjs');
+      // Clear SL_ env vars so the worker's launcher instance gets a clean slate
+      const workerEnv = { ...process.env };
+      delete workerEnv.SL_STDIN_FILE;
+      delete workerEnv.SL_STDOUT_FILE;
+
+      if (fs.existsSync(silentLauncher) && fs.existsSync(tsxCli)) {
+        child = spawn(silentLauncher, ['node', tsxCli, workerScript, payloadFile], {
+          detached: true,
+          stdio: 'ignore',
+          cwd: hookInput.cwd,
+          env: workerEnv,
+          windowsHide: true,
+        });
+      } else if (fs.existsSync(tsxCli)) {
+        // Fallback: direct node (may be killed when PseudoConsole closes)
+        child = spawn(process.execPath, [tsxCli, workerScript, payloadFile], {
+          stdio: 'ignore',
+          cwd: hookInput.cwd,
+          env: workerEnv,
+          windowsHide: true,
+        });
+      } else {
+        // Fallback: use npx through shell (may flash console window)
+        child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
+          stdio: 'ignore',
+          cwd: hookInput.cwd,
+          env: workerEnv,
+          shell: true,
+          windowsHide: true,
+        });
+      }
+    } else {
+      child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
+        detached: true,
+        stdio: 'ignore',
+        cwd: hookInput.cwd,
+        env: process.env,
+      });
+    }
     child.unref();
     log(`Spawned background worker (PID: ${child.pid})`);
 
