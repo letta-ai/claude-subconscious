@@ -20,7 +20,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
-import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { getAgentId } from './agent_config.js';
 import {
@@ -29,6 +28,7 @@ import {
   getOrCreateConversation,
   getSyncStateFile,
   lookupConversation,
+  spawnSilentWorker,
   SyncState,
   Agent,
   MemoryBlock,
@@ -43,9 +43,6 @@ import {
 // ESM-compatible __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Windows compatibility: npx needs to be npx.cmd on Windows
-const NPX_CMD = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 
 // Configuration
 const DEBUG = process.env.LETTA_DEBUG === '1';
@@ -216,7 +213,9 @@ async function fetchAssistantMessages(
     return { messages: [], lastMessageId: null };
   }
 
-  const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages?limit=50`;
+  // Use a high limit because Letta returns multiple entries per logical message
+  // (hidden_reasoning + assistant_message pairs), so limit=50 may not reach newest messages
+  const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages?limit=300`;
 
   const response = await fetch(url, {
     method: 'GET',
@@ -232,19 +231,22 @@ async function fetchAssistantMessages(
   }
 
   const allMessages: LettaMessage[] = await response.json();
-  debug(`Fetched ${allMessages.length} total messages from conversation`);
 
-  // Filter to assistant messages only
-  // NOTE: API returns messages newest-first
-  const assistantMessages = allMessages.filter(msg => msg.message_type === 'assistant_message');
-  debug(`Found ${assistantMessages.length} assistant messages`);
+  // Filter to assistant messages only, then sort by date descending (newest first)
+  // The API does NOT guarantee newest-first ordering — newer messages can appear at the end
+  const assistantMessages = allMessages
+    .filter(msg => msg.message_type === 'assistant_message')
+    .sort((a, b) => {
+      const da = a.date ? new Date(a.date).getTime() : 0;
+      const db = b.date ? new Date(b.date).getTime() : 0;
+      return db - da; // newest first
+    });
 
   // Find the index of the last seen message
   // Since messages are newest-first, new messages are BEFORE lastSeenIndex (indices 0 to lastSeenIndex-1)
   let endIndex = assistantMessages.length; // Default: return all messages
   if (lastSeenMessageId) {
     const lastSeenIndex = assistantMessages.findIndex(msg => msg.id === lastSeenMessageId);
-    debug(`lastSeenMessageId=${lastSeenMessageId}, lastSeenIndex=${lastSeenIndex}`);
     if (lastSeenIndex !== -1) {
       // Only return messages newer than the last seen one (before it in the array)
       endIndex = lastSeenIndex;
@@ -343,7 +345,7 @@ async function main(): Promise<void> {
     }
     const lastBlockValues = state?.lastBlockValues || null;
     const lastSeenMessageId = state?.lastSeenMessageId || null;
-    
+
     // Fetch agent data and messages in parallel
     const [agent, messagesResult] = await Promise.all([
       fetchAgent(apiKey, agentId),
@@ -351,7 +353,7 @@ async function main(): Promise<void> {
     ]);
     
     const { messages: newMessages, lastMessageId } = messagesResult;
-    
+
     // Detect which blocks have changed since last sync
     const changedBlocks = detectChangedBlocks(agent.blocks || [], lastBlockValues);
     
@@ -436,16 +438,7 @@ async function main(): Promise<void> {
         
         // Spawn background worker
         const workerScript = path.join(__dirname, 'send_worker.ts');
-        const isWindows = process.platform === 'win32';
-        const child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
-          detached: true,
-          stdio: 'ignore',
-          cwd,
-          env: process.env,
-          // Windows requires shell: true for detached processes to work properly
-          ...(isWindows && { shell: true, windowsHide: true }),
-        });
-        child.unref();
+        spawnSilentWorker(workerScript, payloadFile, cwd);
       } catch (promptError) {
         // Don't fail the sync if prompt sending fails - just log warning
         console.error(`Warning: Failed to send prompt to Letta: ${promptError}`);

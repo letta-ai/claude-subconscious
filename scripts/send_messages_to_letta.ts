@@ -24,7 +24,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
-import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { getAgentId } from './agent_config.js';
 import {
@@ -33,6 +32,7 @@ import {
   saveSyncState,
   getOrCreateConversation,
   getSyncStateFile,
+  spawnSilentWorker,
   SyncState,
   LogFn,
   getMode,
@@ -41,9 +41,6 @@ import {
 // ESM-compatible __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Windows compatibility: npx needs to be npx.cmd on Windows
-const NPX_CMD = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 
 // Configuration
 const TEMP_STATE_DIR = '/tmp/letta-claude-sync';  // Temp state (logs, etc.)
@@ -591,16 +588,7 @@ Write your response as if speaking directly to Claude Code.
 
     // Spawn worker as detached background process
     const workerScript = path.join(__dirname, 'send_worker.ts');
-    const isWindows = process.platform === 'win32';
-    const child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
-      detached: true,
-      stdio: 'ignore',
-      cwd: hookInput.cwd,
-      env: process.env,
-      // Windows requires shell: true for detached processes to work properly
-      ...(isWindows && { shell: true, windowsHide: true }),
-    });
-    child.unref();
+    const child = spawnSilentWorker(workerScript, payloadFile, hookInput.cwd);
     log(`Spawned background worker (PID: ${child.pid})`);
 
     log('Hook completed (worker running in background)');
