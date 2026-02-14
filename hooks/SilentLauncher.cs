@@ -53,9 +53,25 @@ class SilentLauncher
     static extern bool InitializeProcThreadAttributeList(IntPtr lpAttributeList, int dwAttributeCount,
         int dwFlags, ref IntPtr lpSize);
 
+    // Win11 26300+ renamed UpdateProcThreadAttributeList to UpdateProcThreadAttribute.
+    // Declare both entry points and try the new name first, falling back to the old one.
     [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true, EntryPoint = "UpdateProcThreadAttribute")]
-    static extern bool UpdateProcThreadAttributeList(IntPtr lpAttributeList, uint dwFlags,
+    static extern bool UpdateProcThreadAttribute_New(IntPtr lpAttributeList, uint dwFlags,
         IntPtr Attribute, IntPtr lpValue, IntPtr cbSize, IntPtr lpPreviousValue, IntPtr lpReturnSize);
+
+    [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true, EntryPoint = "UpdateProcThreadAttributeList")]
+    static extern bool UpdateProcThreadAttribute_Old(IntPtr lpAttributeList, uint dwFlags,
+        IntPtr Attribute, IntPtr lpValue, IntPtr cbSize, IntPtr lpPreviousValue, IntPtr lpReturnSize);
+
+    static bool UpdateProcThreadAttributeSafe(IntPtr attrList, uint flags,
+        IntPtr attr, IntPtr val, IntPtr size, IntPtr prev, IntPtr retSize)
+    {
+        try { return UpdateProcThreadAttribute_New(attrList, flags, attr, val, size, prev, retSize); }
+        catch (EntryPointNotFoundException)
+        {
+            return UpdateProcThreadAttribute_Old(attrList, flags, attr, val, size, prev, retSize);
+        }
+    }
 
     [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
     static extern void DeleteProcThreadAttributeList(IntPtr lpAttributeList);
@@ -227,7 +243,7 @@ class SilentLauncher
 
         IntPtr hPCBoxed = Marshal.AllocHGlobal(IntPtr.Size);
         Marshal.WriteIntPtr(hPCBoxed, hPC);
-        UpdateProcThreadAttributeList(attrList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+        UpdateProcThreadAttributeSafe(attrList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
             hPCBoxed, (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero);
 
         // PseudoConsole + CREATE_NO_WINDOW: no flash, no pipe I/O

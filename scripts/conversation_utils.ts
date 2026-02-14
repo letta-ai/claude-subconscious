@@ -5,6 +5,12 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { spawn, ChildProcess } from 'child_process';
+import { fileURLToPath } from 'url';
+
+// ESM-compatible __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Configuration
 const LETTA_BASE_URL = process.env.LETTA_BASE_URL || 'https://api.letta.com';
@@ -582,4 +588,78 @@ ${locationInfo}
 <letta_memory_blocks>
 ${formattedBlocks}
 </letta_memory_blocks>`;
+}
+
+// ============================================
+// Silent Worker Spawning
+// ============================================
+
+// Windows compatibility: npx needs to be npx.cmd on Windows
+const NPX_CMD = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+
+/**
+ * Spawn a background worker process that survives the parent hook's exit.
+ *
+ * On Windows, uses silent-launcher.exe (PseudoConsole + CREATE_NO_WINDOW)
+ * to avoid console window flashes. Falls back gracefully when the launcher
+ * or tsx CLI is not available.
+ *
+ * On other platforms, spawns via npx tsx as a detached process.
+ */
+export function spawnSilentWorker(
+  workerScript: string,
+  payloadFile: string,
+  cwd: string,
+): ChildProcess {
+  const isWindows = process.platform === 'win32';
+  let child: ChildProcess;
+
+  if (isWindows) {
+    // On Windows, spawn workers through silent-launcher.exe (a winexe).
+    // detached:true is safe on a winexe (no console flash).
+    // The worker gets its own PseudoConsole, so it survives the main
+    // script's PseudoConsole being closed by the parent launcher.
+    const silentLauncher = path.join(__dirname, '..', 'hooks', 'silent-launcher.exe');
+    const tsxCli = path.join(__dirname, '..', 'node_modules', 'tsx', 'dist', 'cli.mjs');
+    // Clear SL_ env vars so the worker's launcher instance gets a clean slate
+    const workerEnv = { ...process.env };
+    delete workerEnv.SL_STDIN_FILE;
+    delete workerEnv.SL_STDOUT_FILE;
+
+    if (fs.existsSync(silentLauncher) && fs.existsSync(tsxCli)) {
+      child = spawn(silentLauncher, ['node', tsxCli, workerScript, payloadFile], {
+        detached: true,
+        stdio: 'ignore',
+        cwd,
+        env: workerEnv,
+        windowsHide: true,
+      });
+    } else if (fs.existsSync(tsxCli)) {
+      // Fallback: direct node (may be killed when PseudoConsole closes)
+      child = spawn(process.execPath, [tsxCli, workerScript, payloadFile], {
+        stdio: 'ignore',
+        cwd,
+        env: workerEnv,
+        windowsHide: true,
+      });
+    } else {
+      // Fallback: use npx through shell (may flash console window)
+      child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
+        stdio: 'ignore',
+        cwd,
+        env: workerEnv,
+        shell: true,
+        windowsHide: true,
+      });
+    }
+  } else {
+    child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
+      detached: true,
+      stdio: 'ignore',
+      cwd,
+      env: process.env,
+    });
+  }
+  child.unref();
+  return child;
 }
