@@ -15,6 +15,9 @@ conversations.json
 .cursor/
 .opencode/
 
+# Plans and design docs (local only)
+docs/
+
 # Evals (internal tooling)
 evals/
 
