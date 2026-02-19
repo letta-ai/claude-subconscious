@@ -50,14 +50,25 @@ interface LettaModel {
   display_name?: string;
 }
 
+interface LlmConfig {
+  model?: string;
+  handle?: string;
+  provider_name?: string;
+  model_endpoint_type?: string;
+  model_endpoint?: string;
+  provider_category?: string;
+  context_window?: number;
+  max_tokens?: number;
+  temperature?: number;
+  enable_reasoner?: boolean;
+  max_reasoning_tokens?: number;
+  [key: string]: unknown;
+}
+
 interface AgentDetails {
   id: string;
   name: string;
-  llm_config?: {
-    model?: string;
-    handle?: string;
-    provider_name?: string;
-  };
+  llm_config?: LlmConfig;
 }
 
 /**
@@ -223,16 +234,22 @@ function getAgentModelHandle(agent: AgentDetails): string | null {
  * Check if a model is available on the server
  */
 function isModelAvailable(models: LettaModel[], modelHandle: string): boolean {
-  // Model handles are in format "provider/model"
-  // The API returns models with various formats, so we check multiple fields
+  return findModel(models, modelHandle) !== null;
+}
+
+/**
+ * Find a model in the available models list by handle.
+ * Returns the matching LettaModel or null.
+ */
+export function findModel(models: LettaModel[], modelHandle: string): LettaModel | null {
   const normalizedHandle = modelHandle.toLowerCase();
-  
-  return models.some(m => {
+
+  return models.find(m => {
     const handle = m.handle?.toLowerCase() || `${m.provider_type}/${m.model}`.toLowerCase();
-    return handle === normalizedHandle || 
+    return handle === normalizedHandle ||
            m.model?.toLowerCase() === normalizedHandle ||
            `${m.provider_type}/${m.name}`.toLowerCase() === normalizedHandle;
-  });
+  }) || null;
 }
 
 /**
@@ -283,37 +300,44 @@ async function ensureModelAvailable(
       if (isModelAvailable(models, envModel)) {
         if (currentModel !== envModel) {
           log(`Using LETTA_MODEL override: ${envModel}`);
-          await updateAgentModel(apiKey, agentId, envModel, log);
+          await updateAgentModel(apiKey, agentId, envModel, models, agent.llm_config, log);
           return envModel;
         }
-        return null; // Already using desired model
+        // Model matches, but check if context_window needs updating
+        const envCW = process.env.LETTA_CONTEXT_WINDOW;
+        if (envCW && agent.llm_config?.context_window !== parseInt(envCW, 10)) {
+          log(`Updating context_window to ${envCW} (was ${agent.llm_config?.context_window})`);
+          await updateAgentModel(apiKey, agentId, envModel, models, agent.llm_config, log);
+          return envModel;
+        }
+        return null; // Already using desired model and context_window
       } else {
         log(`Warning: LETTA_MODEL="${envModel}" is not available on this server`);
         log(`Available models: ${models.map(m => m.handle || `${m.provider_type}/${m.model}`).slice(0, 10).join(', ')}${models.length > 10 ? '...' : ''}`);
       }
     }
-    
+
     // Check if current model is available
     if (currentModel && isModelAvailable(models, currentModel)) {
       log(`Agent's model "${currentModel}" is available`);
       return null; // No change needed
     }
-    
+
     // Model not available - need to select alternative
     log(`Agent's model "${currentModel}" is NOT available on this server`);
-    
+
     const selectedModel = selectBestModel(models, PREFERRED_MODELS);
     if (!selectedModel) {
       throw new Error('No models available on this server. Please configure your Letta server with at least one LLM provider.');
     }
-    
+
     log(`Auto-selecting model: ${selectedModel}`);
     console.log(`\n⚠️  Model Update Required`);
     console.log(`   The Subconscious agent's default model (${currentModel}) is not available.`);
     console.log(`   Auto-selecting: ${selectedModel}`);
     console.log(`   To use a different model, set LETTA_MODEL environment variable.\n`);
-    
-    await updateAgentModel(apiKey, agentId, selectedModel, log);
+
+    await updateAgentModel(apiKey, agentId, selectedModel, models, agent.llm_config, log);
     return selectedModel;
     
   } catch (error) {
@@ -324,37 +348,84 @@ async function ensureModelAvailable(
 }
 
 /**
- * Update agent's model configuration
- * 
- * @param apiKey - Letta API key
- * @param agentId - Agent ID to update
- * @param modelHandle - Model handle (e.g., "openai/gpt-4o-mini", "anthropic/claude-3-5-sonnet")
- * @param log - Logging function
+ * Build llm_config for a model handle using metadata from the available models
+ * list and the agent's current llm_config as a base.
+ *
+ * This preserves existing settings (context_window, temperature, etc.) while
+ * overriding model-identity fields. If LETTA_CONTEXT_WINDOW is set, it takes
+ * precedence over the current value.
+ */
+export function buildLlmConfig(
+  modelHandle: string,
+  models: LettaModel[],
+  currentConfig: LlmConfig | undefined,
+): LlmConfig {
+  const slashIdx = modelHandle.indexOf('/');
+  const providerName = slashIdx > 0 ? modelHandle.substring(0, slashIdx) : undefined;
+  const modelName = slashIdx > 0 ? modelHandle.substring(slashIdx + 1) : modelHandle;
+
+  const modelInfo = findModel(models, modelHandle);
+
+  // Spread current config to preserve settings, then override model fields
+  const config: LlmConfig = {
+    ...(currentConfig || {}),
+    model: modelName,
+    handle: modelHandle,
+    provider_name: providerName || modelInfo?.provider_type || currentConfig?.provider_name,
+    model_endpoint_type: modelInfo?.provider_type || currentConfig?.model_endpoint_type,
+  };
+
+  // LETTA_CONTEXT_WINDOW env var overrides the current value
+  const envContextWindow = process.env.LETTA_CONTEXT_WINDOW;
+  if (envContextWindow) {
+    const parsed = parseInt(envContextWindow, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      config.context_window = parsed;
+    }
+  }
+
+  return config;
+}
+
+/**
+ * Update agent's model configuration via the llm_config PATCH.
+ *
+ * Uses `{ llm_config: {...} }` instead of `{ model: "..." }` because the
+ * top-level model PATCH resets context_window to a server-side default.
+ * Sending the full llm_config preserves context_window and other settings.
  */
 async function updateAgentModel(
   apiKey: string,
   agentId: string,
   modelHandle: string,
+  models: LettaModel[],
+  currentConfig: LlmConfig | undefined,
   log: (msg: string) => void = console.log
 ): Promise<void> {
   const url = `${LETTA_API_BASE}/agents/${agentId}`;
-  
+
   log(`Updating agent model to: ${modelHandle}`);
-  
+
+  const llmConfig = buildLlmConfig(modelHandle, models, currentConfig);
+
+  if (llmConfig.context_window && llmConfig.context_window !== currentConfig?.context_window) {
+    log(`Including context_window: ${llmConfig.context_window}`);
+  }
+
   const response = await fetch(url, {
     method: 'PATCH',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ model: modelHandle }),
+    body: JSON.stringify({ llm_config: llmConfig }),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`Failed to update agent model: ${response.status} ${errorText}`);
   }
-  
+
   log(`Agent model updated to: ${modelHandle}`);
 }
 
