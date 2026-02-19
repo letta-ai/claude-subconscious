@@ -109,6 +109,7 @@ export LETTA_MODE="whisper"    # Default. Or "full" for blocks + messages, "off"
 export LETTA_AGENT_ID="agent-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 export LETTA_BASE_URL="http://localhost:8283"  # For self-hosted Letta
 export LETTA_MODEL="anthropic/claude-sonnet-4-5"  # Model override
+export LETTA_CONTEXT_WINDOW="1048576"             # Context window size (e.g. 1M tokens)
 export LETTA_HOME="$HOME"      # Consolidate .letta state to ~/.letta/
 ```
 
@@ -116,6 +117,7 @@ export LETTA_HOME="$HOME"      # Consolidate .letta state to ~/.letta/
 - `LETTA_AGENT_ID` - If not set, the plugin automatically imports a default "Subconscious" agent on first use.
 - `LETTA_BASE_URL` - For self-hosted Letta servers. Defaults to `https://api.letta.com`.
 - `LETTA_MODEL` - Override the agent's model. Optional - the plugin auto-detects and selects from available models. See [Model Configuration](#model-configuration) below.
+- `LETTA_CONTEXT_WINDOW` - Override the agent's context window size (in tokens). Useful when `LETTA_MODEL` is set to a model with a large context window that differs from the server default. Example: `1048576` for 1M tokens.
 - `LETTA_HOME` - Base directory for plugin state files. Creates `{LETTA_HOME}/.letta/claude/` for session data and conversation mappings. Defaults to current working directory. Set to `$HOME` to consolidate all state in one location.
 ### Modes
 
