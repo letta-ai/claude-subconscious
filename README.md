@@ -116,7 +116,7 @@ export LETTA_CHECKPOINT_MODE="blocking"  # Or "async", "off"
 
 - `LETTA_MODE` - Controls what gets injected. `whisper` (default, messages only), `full` (blocks + messages), `off` (disable). See [Modes](#modes).
 - `LETTA_AGENT_ID` - If not set, the plugin automatically imports a default "Subconscious" agent on first use.
-- `LETTA_BASE_URL` - For self-hosted Letta servers. Defaults to `https://api.letta.com`.
+- `LETTA_BASE_URL` - For self-hosted Letta servers. Defaults to `https://api.letta.com`. See [Running Letta Server Locally](docs/REMOTE_SERVER.md) for setup instructions.
 - `LETTA_MODEL` - Override the agent's model. Optional - the plugin auto-detects and selects from available models. See [Model Configuration](#model-configuration) below.
 - `LETTA_CONTEXT_WINDOW` - Override the agent's context window size (in tokens). Useful when `LETTA_MODEL` is set to a model with a large context window that differs from the server default. Example: `1048576` for 1M tokens.
 - `LETTA_HOME` - Base directory for plugin state files. Creates `{LETTA_HOME}/.letta/claude/` for session data and conversation mappings. Defaults to current working directory. Set to `$HOME` to consolidate all state in one location.
