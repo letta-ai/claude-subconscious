@@ -61,13 +61,13 @@ async function sendViaSdk(payload: SdkPayload): Promise<boolean> {
   }
   // 'full' mode: no allowedTools restriction (all tools available)
 
-  log(`Creating SDK session for conversation ${payload.conversationId} (mode: ${payload.sdkToolsMode})`);
-  log(`  agent: ${payload.agentId}`);
+  log(`Creating SDK session for agent ${payload.agentId} (mode: ${payload.sdkToolsMode})`);
   log(`  cwd: ${payload.cwd}`);
   log(`  allowedTools: ${payload.sdkToolsMode === 'read-only' ? readOnlyTools.join(', ') : 'all'}`);
 
-  // Resume the specific conversation so messages appear in the same thread on app.letta.com
-  const session = resumeSession(payload.conversationId, sessionOptions);
+  // Use agentId — the SDK creates/manages its own conversation.
+  // The Letta API conversation (payload.conversationId) is incompatible with SDK sessions.
+  const session = resumeSession(payload.agentId, sessionOptions);
 
   try {
     log(`Sending message (${payload.message.length} chars)...`);
