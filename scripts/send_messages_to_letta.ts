@@ -36,6 +36,7 @@ import {
   LogFn,
   getMode,
   getTempStateDir,
+  getSdkToolsMode,
 } from './conversation_utils.js';
 import {
   readTranscript,
@@ -322,23 +323,47 @@ Write your response as if speaking directly to Claude Code.
 </instructions>
 </claude_code_session_update>`;
 
-    // Write payload to temp file for the worker
-    const payloadFile = path.join(TEMP_STATE_DIR, `payload-${hookInput.session_id}-${Date.now()}.json`);
-    const payload = {
-      apiKey,
-      conversationId,
-      sessionId: hookInput.session_id,
-      message: userMessage,
-      stateFile: getSyncStateFile(hookInput.cwd, hookInput.session_id),
-      newLastProcessedIndex: messages.length - 1,
-    };
-    fs.writeFileSync(payloadFile, JSON.stringify(payload), 'utf-8');
-    log(`Wrote payload to ${payloadFile}`);
+    // Decide transport: SDK (with client-side tools) or legacy (raw API)
+    const sdkToolsMode = getSdkToolsMode();
+    log(`SDK tools mode: ${sdkToolsMode}`);
 
-    // Spawn worker as detached background process
-    const workerScript = path.join(__dirname, 'send_worker.ts');
-    const child = spawnSilentWorker(workerScript, payloadFile, hookInput.cwd);
-    log(`Spawned background worker (PID: ${child.pid})`);
+    const payloadFile = path.join(TEMP_STATE_DIR, `payload-${hookInput.session_id}-${Date.now()}.json`);
+    const stateFile = getSyncStateFile(hookInput.cwd, hookInput.session_id);
+
+    if (sdkToolsMode !== 'off') {
+      // SDK mode: send via Letta Code SDK (Sub gets client-side tools)
+      const sdkPayload = {
+        agentId,
+        sessionId: hookInput.session_id,
+        message: userMessage,
+        stateFile,
+        newLastProcessedIndex: messages.length - 1,
+        cwd: hookInput.cwd,
+        sdkToolsMode,
+      };
+      fs.writeFileSync(payloadFile, JSON.stringify(sdkPayload), 'utf-8');
+      log(`Wrote SDK payload to ${payloadFile}`);
+
+      const workerScript = path.join(__dirname, 'send_worker_sdk.ts');
+      const child = spawnSilentWorker(workerScript, payloadFile, hookInput.cwd);
+      log(`Spawned SDK worker (PID: ${child.pid})`);
+    } else {
+      // Legacy mode: send via raw API (memory-only Sub)
+      const legacyPayload = {
+        apiKey,
+        conversationId,
+        sessionId: hookInput.session_id,
+        message: userMessage,
+        stateFile,
+        newLastProcessedIndex: messages.length - 1,
+      };
+      fs.writeFileSync(payloadFile, JSON.stringify(legacyPayload), 'utf-8');
+      log(`Wrote legacy payload to ${payloadFile}`);
+
+      const workerScript = path.join(__dirname, 'send_worker.ts');
+      const child = spawnSilentWorker(workerScript, payloadFile, hookInput.cwd);
+      log(`Spawned legacy worker (PID: ${child.pid})`);
+    }
 
     log('Hook completed (worker running in background)');
 

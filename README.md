@@ -112,6 +112,7 @@ export LETTA_MODEL="anthropic/claude-sonnet-4-5"  # Model override
 export LETTA_CONTEXT_WINDOW="1048576"             # Context window size (e.g. 1M tokens)
 export LETTA_HOME="$HOME"      # Consolidate .letta state to ~/.letta/
 export LETTA_CHECKPOINT_MODE="blocking"  # Or "async", "off"
+export LETTA_SDK_TOOLS="read-only"       # Or "full", "off"
 ```
 
 - `LETTA_MODE` - Controls what gets injected. `whisper` (default, messages only), `full` (blocks + messages), `off` (disable). See [Modes](#modes).
@@ -121,6 +122,7 @@ export LETTA_CHECKPOINT_MODE="blocking"  # Or "async", "off"
 - `LETTA_CONTEXT_WINDOW` - Override the agent's context window size (in tokens). Useful when `LETTA_MODEL` is set to a model with a large context window that differs from the server default. Example: `1048576` for 1M tokens.
 - `LETTA_HOME` - Base directory for plugin state files. Creates `{LETTA_HOME}/.letta/claude/` for session data and conversation mappings. Defaults to current working directory. Set to `$HOME` to consolidate all state in one location.
 - `LETTA_CHECKPOINT_MODE` - Controls checkpoint behavior at natural pause points (`AskUserQuestion`, `ExitPlanMode`). See [Checkpoint Hooks](#checkpoint-hooks).
+- `LETTA_SDK_TOOLS` - Controls client-side tool access for the Subconscious agent. See [SDK Tools](#sdk-tools).
 
 ### Modes
 
@@ -303,23 +305,38 @@ Consider asking about X before proceeding...
 </letta_message>
 ```
 
+### SDK Tools
+
+By default, the Subconscious agent now gets **client-side tool access** via the [Letta Code SDK](https://docs.letta.com/letta-code/sdk/). Instead of being limited to memory operations, Sub can read your files, search the web, and explore your codebase while processing transcripts.
+
+**Configuration via `LETTA_SDK_TOOLS`:**
+
+| Mode | Tools Available | Use Case |
+|------|----------------|----------|
+| `read-only` (default) | `Read`, `Grep`, `Glob`, `web_search`, `fetch_webpage` | Safe background research and file reading |
+| `full` | All tools (Bash, Edit, Write, etc.) | Full autonomy — Sub can make changes |
+| `off` | None (memory-only) | Legacy behavior, raw API transport |
+
+> **Note:** Requires `@letta-ai/letta-code-sdk` (installed as a dependency). Set `LETTA_SDK_TOOLS=off` to use the legacy raw API path without the SDK.
+
 ### Stop
 
-Uses a **fire-and-forget** pattern to avoid timeout issues:
+Uses an **async hook** pattern — runs in the background without blocking Claude Code:
 
 1. Main hook (`send_messages_to_letta.ts`) runs quickly:
    - Parses the session transcript (JSONL format)
    - Extracts user messages, assistant responses, thinking blocks, and tool usage
    - Writes payload to a temp file
-   - Spawns detached background worker (`send_worker.ts`)
+   - Spawns detached background worker
    - Exits immediately
 
 2. Background worker runs independently:
-   - Sends messages to Letta agent
+   - **SDK mode** (`send_worker_sdk.ts`): Opens a Letta Code SDK session, giving Sub client-side tools
+   - **Legacy mode** (`send_worker.ts`): Sends via raw API (memory-only)
    - Updates state on success
    - Cleans up temp file
 
-This ensures the hook never times out, even when the Letta API is slow.
+The Stop hook runs as an async hook, so it never blocks Claude Code.
 
 ## State Management
 

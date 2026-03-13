@@ -33,6 +33,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@letta-ai/letta-code-sdk": "^0.1.0",
     "tsx": "^4.7.0"
   },
   "devDependencies": {
