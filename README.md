@@ -419,7 +419,7 @@ tail -f /tmp/letta-claude-sync-$(id -u)/*.log
 
 # Or specific logs
 tail -f /tmp/letta-claude-sync-$(id -u)/send_messages.log
-tail -f /tmp/letta-claude-sync-$(id -u)/send_worker.log
+tail -f /tmp/letta-claude-sync-$(id -u)/send_worker_sdk.log
 ```
 
 ## API Notes
