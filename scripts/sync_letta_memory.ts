@@ -21,6 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import { getAgentId } from './agent_config.js';
+import { buildLettaApiUrl } from './letta_api_url.js';
 import {
   loadSyncState,
   saveSyncState,
@@ -35,7 +36,6 @@ import {
   cleanLettaFromClaudeMd,
   getMode,
   getTempStateDir,
-  LETTA_API_BASE,
 } from './conversation_utils.js';
 
 // Configuration
@@ -198,7 +198,9 @@ async function fetchAssistantMessages(
 
   // Use a high limit because Letta returns multiple entries per logical message
   // (hidden_reasoning + assistant_message pairs), so limit=50 may not reach newest messages
-  const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages?limit=300`;
+  const url = buildLettaApiUrl(`/conversations/${conversationId}/messages`, {
+    limit: 300,
+  });
 
   const response = await fetch(url, {
     method: 'GET',

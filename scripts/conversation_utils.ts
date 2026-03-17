@@ -8,14 +8,17 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import { fileURLToPath } from 'url';
+import {
+  buildLettaApiUrl,
+  LETTA_API_BASE,
+} from './letta_api_url.js';
 
 // ESM-compatible __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Configuration
-const LETTA_BASE_URL = process.env.LETTA_BASE_URL || 'https://api.letta.com';
-export const LETTA_API_BASE = `${LETTA_BASE_URL}/v1`;
+export { LETTA_API_BASE };
 // Only show app URL for hosted service; self-hosted users get IDs directly
 const IS_HOSTED = !process.env.LETTA_BASE_URL;
 const LETTA_APP_BASE = 'https://app.letta.com';
@@ -202,7 +205,7 @@ export function saveConversationsMap(cwd: string, map: ConversationsMap): void {
  * Create a new conversation for an agent
  */
 export async function createConversation(apiKey: string, agentId: string, log: LogFn = noopLog): Promise<string> {
-  const url = `${LETTA_API_BASE}/conversations?agent_id=${agentId}`;
+  const url = buildLettaApiUrl('/conversations/', { agent_id: agentId });
   
   log(`Creating new conversation for agent ${agentId}`);
   
@@ -339,7 +342,9 @@ export interface Agent {
  * Fetch agent data from Letta API
  */
 export async function fetchAgent(apiKey: string, agentId: string): Promise<Agent> {
-  const url = `${LETTA_API_BASE}/agents/${agentId}?include=agent.blocks`;
+  const url = buildLettaApiUrl(`/agents/${agentId}`, {
+    include: 'agent.blocks',
+  });
 
   const response = await fetch(url, {
     method: 'GET',

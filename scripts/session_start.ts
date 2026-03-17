@@ -33,10 +33,9 @@ import {
   getTempStateDir,
   getSdkToolsMode,
 } from './conversation_utils.js';
+import { buildLettaApiUrl } from './letta_api_url.js';
 
 // Configuration
-const LETTA_BASE_URL = process.env.LETTA_BASE_URL || 'https://api.letta.com';
-const LETTA_API_BASE = `${LETTA_BASE_URL}/v1`;
 const TEMP_STATE_DIR = getTempStateDir();
 const LOG_FILE = path.join(TEMP_STATE_DIR, 'session_start.log');
 
@@ -173,7 +172,7 @@ async function sendSessionStartMessage(
   sessionId: string,
   cwd: string
 ): Promise<void> {
-  const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages`;
+  const url = buildLettaApiUrl(`/conversations/${conversationId}/messages`);
 
   const projectName = path.basename(cwd);
   const timestamp = new Date().toISOString();

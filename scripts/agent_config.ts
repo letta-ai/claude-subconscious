@@ -15,12 +15,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { buildLettaApiUrl } from './letta_api_url.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const LETTA_BASE_URL = process.env.LETTA_BASE_URL || 'https://api.letta.com';
-const LETTA_API_BASE = `${LETTA_BASE_URL}/v1`;
 const CONFIG_DIR = path.join(process.env.HOME || '~', '.letta', 'claude-subconscious');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 const DEFAULT_AGENT_FILE = path.join(__dirname, '..', 'Subconscious.af');
@@ -154,7 +153,7 @@ function getAgentNameFromFile(): string {
  * Rename an agent
  */
 async function renameAgent(apiKey: string, agentId: string, name: string): Promise<void> {
-  const url = `${LETTA_API_BASE}/agents/${agentId}`;
+  const url = buildLettaApiUrl(`/agents/${agentId}`);
   
   const response = await fetch(url, {
     method: 'PATCH',
@@ -175,7 +174,7 @@ async function renameAgent(apiKey: string, agentId: string, name: string): Promi
  * List available models from Letta server
  */
 async function listAvailableModels(apiKey: string): Promise<LettaModel[]> {
-  const url = `${LETTA_API_BASE}/models/`;
+  const url = buildLettaApiUrl('/models/');
   
   const response = await fetch(url, {
     method: 'GET',
@@ -195,7 +194,7 @@ async function listAvailableModels(apiKey: string): Promise<LettaModel[]> {
  * Get agent details including current model configuration
  */
 async function getAgentDetails(apiKey: string, agentId: string): Promise<AgentDetails> {
-  const url = `${LETTA_API_BASE}/agents/${agentId}`;
+  const url = buildLettaApiUrl(`/agents/${agentId}`);
   
   const response = await fetch(url, {
     method: 'GET',
@@ -402,7 +401,7 @@ async function updateAgentModel(
   currentConfig: LlmConfig | undefined,
   log: (msg: string) => void = console.log
 ): Promise<void> {
-  const url = `${LETTA_API_BASE}/agents/${agentId}`;
+  const url = buildLettaApiUrl(`/agents/${agentId}`);
 
   log(`Updating agent model to: ${modelHandle}`);
 
@@ -433,7 +432,7 @@ async function updateAgentModel(
  * Import agent from .af file
  */
 async function importDefaultAgent(apiKey: string): Promise<string> {
-  const url = `${LETTA_API_BASE}/agents/import`;
+  const url = buildLettaApiUrl('/agents/import');
   
   // Read the agent file
   const agentFileContent = fs.readFileSync(DEFAULT_AGENT_FILE);

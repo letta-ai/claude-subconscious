@@ -17,13 +17,13 @@
 import * as fs from 'fs';
 import * as readline from 'readline';
 import { getAgentId } from './agent_config.js';
+import { buildLettaApiUrl } from './letta_api_url.js';
 import {
   loadSyncState,
   saveSyncState,
   lookupConversation,
   SyncState,
   getMode,
-  LETTA_API_BASE,
 } from './conversation_utils.js';
 
 const DEBUG = process.env.LETTA_DEBUG === '1';
@@ -100,7 +100,9 @@ async function readHookInput(): Promise<HookInput | null> {
  * Fetch agent data from Letta API
  */
 async function fetchAgent(apiKey: string, agentId: string): Promise<Agent> {
-  const url = `${LETTA_API_BASE}/agents/${agentId}?include=agent.blocks`;
+  const url = buildLettaApiUrl(`/agents/${agentId}`, {
+    include: 'agent.blocks',
+  });
   
   const response = await fetch(url, {
     method: 'GET',
@@ -129,7 +131,9 @@ async function fetchNewMessages(
     return { messages: [], lastMessageId: null };
   }
 
-  const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages?limit=20`;
+  const url = buildLettaApiUrl(`/conversations/${conversationId}/messages`, {
+    limit: 20,
+  });
 
   const response = await fetch(url, {
     method: 'GET',
