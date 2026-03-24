@@ -33,6 +33,8 @@ const PREFERRED_MODELS = [
   'openai/gpt-5.2',              // Flagship fallback
   'google_ai/gemini-3-flash',    // Google's balanced option
   'google_ai/gemini-2.5-flash',  // Fallback
+  'minimax/MiniMax-M2.7',        // MiniMax flagship, 1M context, strong tool use
+  'minimax/MiniMax-M2.7-highspeed', // MiniMax fast option
 ];
 
 interface Config {

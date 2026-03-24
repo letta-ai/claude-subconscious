@@ -106,6 +106,8 @@ const SAMPLE_MODELS = [
   { model: 'gemini-3-pro-preview', name: 'gemini-3-pro-preview', provider_type: 'google_ai', handle: 'google_ai/gemini-3-pro-preview' },
   { model: 'gemini-3-pro-preview', name: 'gemini-3-pro-preview', provider_type: 'google_ai', handle: 'gem1/gemini-3-pro-preview' },
   { model: 'gpt-5.2', name: 'gpt-5.2', provider_type: 'openai', handle: 'openai/gpt-5.2' },
+  { model: 'MiniMax-M2.7', name: 'MiniMax-M2.7', provider_type: 'minimax', handle: 'minimax/MiniMax-M2.7' },
+  { model: 'MiniMax-M2.7-highspeed', name: 'MiniMax-M2.7-highspeed', provider_type: 'minimax', handle: 'minimax/MiniMax-M2.7-highspeed' },
 ];
 
 describe('findModel', () => {
@@ -138,6 +140,31 @@ describe('findModel', () => {
 
   it('should return null for empty models list', () => {
     expect(findModel([], 'anthropic/claude-sonnet-4-5')).toBeNull();
+  });
+
+  it('should find MiniMax model by exact handle', () => {
+    const result = findModel(SAMPLE_MODELS, 'minimax/MiniMax-M2.7');
+    expect(result).not.toBeNull();
+    expect(result!.handle).toBe('minimax/MiniMax-M2.7');
+    expect(result!.provider_type).toBe('minimax');
+  });
+
+  it('should find MiniMax highspeed model by handle', () => {
+    const result = findModel(SAMPLE_MODELS, 'minimax/MiniMax-M2.7-highspeed');
+    expect(result).not.toBeNull();
+    expect(result!.handle).toBe('minimax/MiniMax-M2.7-highspeed');
+  });
+
+  it('should find MiniMax model case-insensitively', () => {
+    const result = findModel(SAMPLE_MODELS, 'Minimax/minimax-m2.7');
+    expect(result).not.toBeNull();
+    expect(result!.provider_type).toBe('minimax');
+  });
+
+  it('should find MiniMax model by bare model name', () => {
+    const result = findModel(SAMPLE_MODELS, 'MiniMax-M2.7');
+    expect(result).not.toBeNull();
+    expect(result!.provider_type).toBe('minimax');
   });
 });
 
@@ -193,5 +220,28 @@ describe('buildLlmConfig', () => {
     expect(config.model).toBe('gpt-5.2');
     expect(config.handle).toBe('openai/gpt-5.2');
     expect(config.provider_name).toBe('openai');
+  });
+
+  it('should build correct config for MiniMax model', () => {
+    const config = buildLlmConfig('minimax/MiniMax-M2.7', SAMPLE_MODELS, undefined);
+    expect(config.model).toBe('MiniMax-M2.7');
+    expect(config.handle).toBe('minimax/MiniMax-M2.7');
+    expect(config.provider_name).toBe('minimax');
+    expect(config.model_endpoint_type).toBe('minimax');
+  });
+
+  it('should build correct config for MiniMax highspeed model', () => {
+    const config = buildLlmConfig('minimax/MiniMax-M2.7-highspeed', SAMPLE_MODELS, undefined);
+    expect(config.model).toBe('MiniMax-M2.7-highspeed');
+    expect(config.handle).toBe('minimax/MiniMax-M2.7-highspeed');
+    expect(config.provider_name).toBe('minimax');
+  });
+
+  it('should preserve existing settings when switching to MiniMax', () => {
+    const current = { model: 'claude-sonnet-4-5', context_window: 200000, temperature: 0.5 };
+    const config = buildLlmConfig('minimax/MiniMax-M2.7', SAMPLE_MODELS, current);
+    expect(config.model).toBe('MiniMax-M2.7');
+    expect(config.context_window).toBe(200000);
+    expect(config.temperature).toBe(0.5);
   });
 });

@@ -189,7 +189,9 @@ When the agent's model isn't available, the plugin selects from available models
 4. `openai/gpt-5.2` (flagship fallback)
 5. `google_ai/gemini-3-flash` (Google's balanced option)
 6. `google_ai/gemini-2.5-flash` (fallback)
-7. First available model on the server
+7. `minimax/MiniMax-M2.7` (MiniMax flagship, 1M context)
+8. `minimax/MiniMax-M2.7-highspeed` (MiniMax fast option)
+9. First available model on the server
 
 #### Manual Override
 
@@ -206,6 +208,7 @@ The model handle format is `provider/model`. Common options:
 | `openai` | `gpt-5.2`, `gpt-5-nano`, `gpt-4.1-mini` |
 | `anthropic` | `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-haiku-4-5` |
 | `google_ai` | `gemini-3-flash`, `gemini-2.5-flash`, `gemini-2.5-pro` |
+| `minimax` | `MiniMax-M2.7` (1M context, strong tool use), `MiniMax-M2.7-highspeed` |
 | `zai` | `glm-5` (Letta Cloud default, free) |
 
 If `LETTA_MODEL` is set but not available on the server, the plugin will warn you and fall back to auto-selection.
