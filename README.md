@@ -1,7 +1,7 @@
 > [!IMPORTANT]
 > Claude Subconscious is demo app built using the Letta Code SDK, and is not intended to be used in production.
 >
-> If you want to use a coding agent that runs background subconcious agents, use [**Letta Code**](https://github.com/letta-ai/letta-code), which is also fully open source.
+> If you want to use a coding agent that runs background subconscious agents, use [**Letta Code**](https://github.com/letta-ai/letta-code), which is also fully open source.
 >
 > Install the Letta Code CLI with `npm install -g @letta-ai/letta-code`, then use `letta` to launch.
 
