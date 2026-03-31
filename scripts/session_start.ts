@@ -255,8 +255,10 @@ async function main(): Promise<void> {
   // Try to open TTY for user-visible output (bypasses Claude's capture)
   let tty: fs.WriteStream | null = null;
   try {
-    tty = fs.createWriteStream('/dev/tty');
-    tty.on('error', () => { tty = null; }); // Handle async ENXIO when /dev/tty unavailable
+    if (fs.existsSync('/dev/tty')) {
+      tty = fs.createWriteStream('/dev/tty');
+      tty.on('error', () => { tty = null; });
+    }
   } catch {
     // TTY not available (e.g., non-interactive session)
   }
