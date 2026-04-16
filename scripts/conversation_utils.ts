@@ -116,11 +116,26 @@ export type LogFn = (message: string) => void;
 const noopLog: LogFn = () => {};
 
 /**
+ * Expand common shell syntax in a path value.
+ * Handles $HOME, ${HOME}, and ~ when set via settings.json (no shell expansion).
+ */
+export function expandPath(value: string): string {
+  const home = os.homedir();
+  if (value === '$HOME' || value === '${HOME}') return home;
+  if (value.startsWith('$HOME/')) return path.join(home, value.slice(6));
+  if (value.startsWith('${HOME}/')) return path.join(home, value.slice(8));
+  if (value === '~') return home;
+  if (value.startsWith('~/')) return path.join(home, value.slice(2));
+  return value;
+}
+
+/**
  * Get durable state directory path
  * If LETTA_HOME is set, use that as the base instead of cwd
  */
 export function getDurableStateDir(cwd: string): string {
-  const base = process.env.LETTA_HOME || cwd;
+  const raw = process.env.LETTA_HOME || cwd;
+  const base = process.env.LETTA_HOME ? expandPath(raw) : raw;
   return path.join(base, '.letta', 'claude');
 }
 

@@ -32,6 +32,7 @@ import {
   getMode,
   getTempStateDir,
   getSdkToolsMode,
+  expandPath,
 } from './conversation_utils.js';
 import { buildLettaApiUrl } from './letta_api_url.js';
 
@@ -64,7 +65,8 @@ interface Conversation {
 // Durable storage in .letta directory
 // If LETTA_HOME is set, use that as the base instead of cwd
 function getDurableStateDir(cwd: string): string {
-  const base = process.env.LETTA_HOME || cwd;
+  const raw = process.env.LETTA_HOME || cwd;
+  const base = process.env.LETTA_HOME ? expandPath(raw) : raw;
   return path.join(base, '.letta', 'claude');
 }
 
@@ -253,12 +255,15 @@ async function main(): Promise<void> {
   }
 
   // Try to open TTY for user-visible output (bypasses Claude's capture)
+  // Skip on Windows — /dev/tty resolves to C:\dev\tty which doesn't exist
   let tty: fs.WriteStream | null = null;
-  try {
-    tty = fs.createWriteStream('/dev/tty');
-    tty.on('error', () => { tty = null; }); // Handle async ENXIO when /dev/tty unavailable
-  } catch {
-    // TTY not available (e.g., non-interactive session)
+  if (process.platform !== 'win32') {
+    try {
+      tty = fs.createWriteStream('/dev/tty');
+      tty.on('error', () => { tty = null; }); // Handle async ENXIO when /dev/tty unavailable
+    } catch {
+      // TTY not available (e.g., non-interactive session)
+    }
   }
 
   const writeTty = (text: string) => {
@@ -305,7 +310,7 @@ async function main(): Promise<void> {
       writeTty(`  Server:     ${baseUrl}\n`);
     }
     if (process.env.LETTA_HOME) {
-      writeTty(`  Home:       ${process.env.LETTA_HOME}\n`);
+      writeTty(`  Home:       ${expandPath(process.env.LETTA_HOME)}\n`);
     }
     writeTty('\n');
     writeTty('  Learn about configuration settings:\n');
