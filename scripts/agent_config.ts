@@ -530,6 +530,7 @@ async function importDefaultAgent(apiKey: string): Promise<string> {
 export async function getAgentId(apiKey: string, log: (msg: string) => void = console.log): Promise<string> {
   let agentId: string;
   let config = readConfig();
+  let agentSource: 'env' | 'saved' | 'imported';
   
   // 1. Check environment variable
   const envAgentId = process.env.LETTA_AGENT_ID;
@@ -542,6 +543,7 @@ export async function getAgentId(apiKey: string, log: (msg: string) => void = co
     }
     log(`Using agent ID from LETTA_AGENT_ID: ${envAgentId}`);
     agentId = envAgentId;
+    agentSource = 'env';
   }
   // 2. Check saved config
   else if (config.agentId) {
@@ -552,22 +554,36 @@ export async function getAgentId(apiKey: string, log: (msg: string) => void = co
       // Fall through to import default agent
       agentId = await importAndSaveAgent(apiKey, log);
       config = readConfig(); // Reload config after import
+      agentSource = 'imported';
     } else {
       log(`Using saved agent ID: ${config.agentId}`);
       agentId = config.agentId;
+      agentSource = 'saved';
     }
   }
   // 3. Import default agent
   else {
     agentId = await importAndSaveAgent(apiKey, log);
     config = readConfig(); // Reload config after import
+    agentSource = 'imported';
   }
   
-  // 4. Ensure required tags are present (for memory + origin tracking)
-  try {
-    await ensureRequiredAgentTags(apiKey, agentId, log);
-  } catch (error) {
-    log(`Warning: Could not ensure required tags: ${error}`);
+  // 4. Ensure required tags are present only for Subconscious-managed agents.
+  //
+  // A user-supplied LETTA_AGENT_ID may point at a normal Letta Code agent with
+  // its own MemFS repo. Patching tags on that external agent is surprisingly
+  // heavyweight: if the outgoing tag list includes git-memory-enabled, the
+  // server's update path may run git-memory initialization/backfill even when
+  // we are only adding an origin marker. Treat env-provided agents as external
+  // and avoid mutating their tags here.
+  if (agentSource !== 'env') {
+    try {
+      await ensureRequiredAgentTags(apiKey, agentId, log);
+    } catch (error) {
+      log(`Warning: Could not ensure required tags: ${error}`);
+    }
+  } else {
+    log('Using external LETTA_AGENT_ID; skipping Subconscious tag reconciliation');
   }
 
   // 5. Ensure model is available (auto-select if not)

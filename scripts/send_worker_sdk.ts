@@ -54,6 +54,11 @@ async function sendViaSdk(payload: SdkPayload): Promise<boolean> {
     skillSources: [],          // Sub doesn't need skills
     systemInfoReminder: false, // reduce noise
     sleeptime: { trigger: 'off' }, // don't recurse sleeptime
+    // The worker only needs to deliver a transcript to an existing Letta
+    // conversation. It should not clone/pull/reconcile the agent's MemFS repo
+    // on every Claude Code Stop hook: doing so can interact badly with a
+    // user-supplied LETTA_AGENT_ID whose memory is actively managed elsewhere.
+    memfsStartup: 'skip',
   };
 
   if (payload.sdkToolsMode === 'off') {
