@@ -433,11 +433,17 @@ export function buildLlmConfig(
 }
 
 /**
- * Update agent's model configuration via the llm_config PATCH.
+ * Update agent's model configuration via the agent PATCH endpoint.
  *
- * Uses `{ llm_config: {...} }` instead of `{ model: "..." }` because the
- * top-level model PATCH resets context_window to a server-side default.
- * Sending the full llm_config preserves context_window and other settings.
+ * Letta deprecated the `llm_config` request body (HTTP 400:
+ * "The `llm_config` field is deprecated and no longer accepted. Use the `model`
+ * field instead."). The replacement shape is top-level `model` plus
+ * `context_window_limit` — the latter explicitly avoids the old footgun where
+ * a bare `{ model }` PATCH reset context_window to a server default.
+ *
+ * buildLlmConfig() is kept for callers that still need the resolved
+ * provider/model metadata; we just pull the two server-accepted fields out of
+ * it and send those.
  */
 async function updateAgentModel(
   apiKey: string,
@@ -453,8 +459,12 @@ async function updateAgentModel(
 
   const llmConfig = buildLlmConfig(modelHandle, models, currentConfig);
 
-  if (llmConfig.context_window && llmConfig.context_window !== currentConfig?.context_window) {
-    log(`Including context_window: ${llmConfig.context_window}`);
+  const body: Record<string, unknown> = { model: modelHandle };
+  if (typeof llmConfig.context_window === 'number') {
+    body.context_window_limit = llmConfig.context_window;
+    if (llmConfig.context_window !== currentConfig?.context_window) {
+      log(`Including context_window: ${llmConfig.context_window}`);
+    }
   }
 
   const response = await fetch(url, {
@@ -463,7 +473,7 @@ async function updateAgentModel(
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ llm_config: llmConfig }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
