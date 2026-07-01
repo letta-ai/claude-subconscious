@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Deprecated `llm_config` PATCH shape** — `updateAgentModel()` was sending `{ llm_config: {...} }` as the agent PATCH body. Letta now rejects that with HTTP 400 ("The `llm_config` field is deprecated and no longer accepted. Use the `model` field instead."). The session-start model/context-window sync therefore failed silently on every Claude Code launch, leaving `LETTA_MODEL` / `LETTA_CONTEXT_WINDOW` env overrides un-applied — agents stayed pinned to whatever they last had server-side. Switched to the new top-level `model` + `context_window_limit` shape.
+
 ## [1.1.0] - 2026-01-28
 
 ### Added
