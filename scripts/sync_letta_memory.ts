@@ -197,9 +197,11 @@ async function fetchAssistantMessages(
   }
 
   // Use a high limit because Letta returns multiple entries per logical message
-  // (hidden_reasoning + assistant_message pairs), so limit=50 may not reach newest messages
+  // (hidden_reasoning + assistant_message pairs), so limit=50 may not reach newest messages.
+  // NOTE: 200 is the maximum the API accepts — higher values are rejected with
+  // HTTP 422, which the !response.ok branch below swallows into "no new messages".
   const url = buildLettaApiUrl(`/conversations/${conversationId}/messages`, {
-    limit: 300,
+    limit: 200,
   });
 
   const response = await fetch(url, {
