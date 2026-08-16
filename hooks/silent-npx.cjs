@@ -28,14 +28,20 @@ if (args[0] === 'tsx') {
   // absolute paths like "/scripts/foo.ts" which don't exist. Re-resolve
   // them relative to the plugin root (which we know from __dirname).
   scriptArgs = scriptArgs.map(arg => {
-    if (!fs.existsSync(arg) && arg.includes('/scripts/')) {
+    if (!fs.existsSync(arg) && /[\\/]scripts[\\/]/.test(arg)) {
       const basename = path.basename(arg);
       const resolved = path.join(pluginRoot, 'scripts', basename);
       if (fs.existsSync(resolved)) return resolved;
     }
     return arg;
   });
-  const tsxCli = path.join(pluginRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  let tsxCli;
+  try {
+    // require.resolve follows npm's dependency tree, including hoisted installs.
+    tsxCli = require.resolve('tsx/cli', { paths: [pluginRoot] });
+  } catch {
+    tsxCli = path.join(pluginRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  }
 
   if (isWindows) {
     const silentLauncher = path.join(__dirname, 'silent-launcher.exe');

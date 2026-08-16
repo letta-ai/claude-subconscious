@@ -1,10 +1,10 @@
 #!/usr/bin/env npx tsx
 /**
- * SDK-based background worker that sends messages to Letta via Letta Code SDK.
+ * SDK-based background worker that sends messages to Letta via Letta Agent SDK.
  * Gives the Subconscious agent client-side tool access (Read, Grep, Glob, etc.).
  *
  * Spawned by send_messages_to_letta.ts as a detached process.
- * Falls back gracefully if the SDK is not available.
+ * The plugin package provides the SDK and tsx runtime dependencies.
  *
  * Usage: npx tsx send_worker_sdk.ts <payload_file>
  */
@@ -12,6 +12,10 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import {
+  LettaAgentClient,
+  type LettaCodeClientSessionOptions,
+} from '@letta-ai/letta-agent-sdk';
 
 const uid = typeof process.getuid === 'function' ? process.getuid() : process.pid;
 const TEMP_STATE_DIR = path.join(os.tmpdir(), `letta-claude-sync-${uid}`);
@@ -25,7 +29,7 @@ interface SdkPayload {
   stateFile: string;
   newLastProcessedIndex: number;
   cwd: string;
-  sdkToolsMode: 'read-only' | 'full';
+  sdkToolsMode: 'off' | 'read-only' | 'full';
 }
 
 function log(message: string): void {
@@ -38,32 +42,22 @@ function log(message: string): void {
 }
 
 async function sendViaSdk(payload: SdkPayload): Promise<boolean> {
-  log(`Loading Letta Code SDK...`);
-
-  // Dynamic import so this file can be parsed even if SDK isn't installed
-  const { resumeSession } = await import('@letta-ai/letta-code-sdk');
+  log(`Loading Letta Agent SDK...`);
 
   // Configure tool restrictions based on mode
   const readOnlyTools = ['Read', 'Grep', 'Glob', 'web_search', 'fetch_webpage'];
-  const blockedTools = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
-
-  const sessionOptions: Record<string, unknown> = {
-    disallowedTools: blockedTools,
-    permissionMode: 'bypassPermissions',
+  const sessionOptions: LettaCodeClientSessionOptions = {
+    permissionMode: 'unrestricted',
     cwd: payload.cwd,
-    skillSources: [],          // Sub doesn't need skills
-    systemInfoReminder: false, // reduce noise
-    sleeptime: { trigger: 'off' }, // don't recurse sleeptime
-    // The worker only needs to deliver a transcript to an existing Letta
-    // conversation. It should not clone/pull/reconcile the agent's MemFS repo
-    // on every Claude Code Stop hook: doing so can interact badly with a
-    // user-supplied LETTA_AGENT_ID whose memory is actively managed elsewhere.
-    memfsStartup: 'skip',
+    skillSources: [], // Sub doesn't need skills
+    // Skip MemFS startup, local transcripts, mods, and automatic reflection.
+    // This preserves the old memfsStartup: 'skip' worker behavior.
+    stateless: true,
   };
 
   if (payload.sdkToolsMode === 'off') {
-    // Listen-only: block all client-side tools, Sub can only use memory operations
-    sessionOptions.disallowedTools = [...blockedTools, ...readOnlyTools, 'Bash', 'Edit', 'Write', 'Task', 'Glob', 'Grep', 'Read'];
+    // Listen-only: an empty allowlist hides every client-side tool.
+    sessionOptions.allowedTools = [];
   } else if (payload.sdkToolsMode === 'read-only') {
     sessionOptions.allowedTools = readOnlyTools;
   }
@@ -75,7 +69,13 @@ async function sendViaSdk(payload: SdkPayload): Promise<boolean> {
   log(`  cwd: ${payload.cwd}`);
   log(`  allowedTools: ${toolsLabel}`);
 
-  const session = resumeSession(payload.conversationId, sessionOptions);
+  // Run the Cloud conversation through a local App Server so client-side tools
+  // execute in the user's project instead of an SDK-managed Cloud sandbox.
+  const client = new LettaAgentClient({
+    backend: 'local',
+    appServer: { harnessBackend: 'api' },
+  });
+  const session = client.resumeSession(payload.conversationId, sessionOptions);
 
   try {
     log(`Sending message (${payload.message.length} chars)...`);
@@ -91,9 +91,9 @@ async function sendViaSdk(payload: SdkPayload): Promise<boolean> {
         assistantResponse += msg.content;
         log(`  Assistant chunk: ${msg.content.substring(0, 100)}...`);
       } else if (msg.type === 'tool_call') {
-        log(`  Tool call: ${(msg as any).toolName}`);
+        log(`  Tool call: ${msg.toolName}`);
       } else if (msg.type === 'error') {
-        log(`  Error: ${(msg as any).message}`);
+        log(`  Error: ${msg.message}`);
       }
     }
 

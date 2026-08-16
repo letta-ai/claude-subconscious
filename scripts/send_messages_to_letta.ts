@@ -206,7 +206,7 @@ Write your response as if speaking directly to Claude Code.
 </instructions>
 </claude_code_session_update>`;
 
-    // Send via Letta Code SDK (Sub gets client-side tools)
+    // Send via Letta Agent SDK (Sub gets client-side tools)
     const sdkToolsMode = getSdkToolsMode();
     log(`SDK tools mode: ${sdkToolsMode}`);
 
@@ -231,6 +231,9 @@ Write your response as if speaking directly to Claude Code.
     log(`Spawned SDK worker (PID: ${child.pid})`);
 
     log('Hook completed (worker running in background)');
+    // Do not let fetch keep-alive sockets or other imported handles keep the
+    // Stop hook alive after the detached worker owns delivery.
+    process.exit(0);
 
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

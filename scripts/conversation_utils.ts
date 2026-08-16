@@ -682,7 +682,7 @@ export function spawnSilentWorker(
     }
   } else {
     // Prefer local tsx CLI to ensure plugin dependencies are resolvable.
-    // npx tsx resolves to a global cache that can't find @letta-ai/letta-code-sdk.
+    // Prefer the plugin's installed tsx and Agent SDK dependency tree.
     const tsxCli = path.join(__dirname, '..', 'node_modules', 'tsx', 'dist', 'cli.mjs');
     if (fs.existsSync(tsxCli)) {
       child = spawn(process.execPath, [tsxCli, workerScript, payloadFile], {

@@ -1,5 +1,5 @@
 > [!IMPORTANT]
-> Claude Subconscious is demo app built using the Letta Code SDK, and is not intended to be used in production.
+> Claude Subconscious is a demo app built using the Letta Agent SDK and is not intended for production use.
 >
 > If you want to use a coding agent that runs background subconscious agents, use [**Letta Code**](https://github.com/letta-ai/letta-code), which is also fully open source.
 >
@@ -19,7 +19,7 @@ Claude Code forgets everything between sessions. Claude Subconscious is a second
 - **Reads your codebase** — explores files with Read, Grep, and Glob while processing transcripts
 - **Remembers** across sessions, projects, and time
 - **Whispers guidance** — surfaces context, patterns, and reminders before each prompt
-- **Never blocks** — runs in the background via the [Letta Code SDK](https://docs.letta.com/letta-code/sdk/)
+- **Never blocks** — runs in the background via the Letta Agent SDK
 
 Not just a memory layer — a background agent with real tool access that gets smarter the more you use it.
 
@@ -27,7 +27,7 @@ Using Letta's [Conversations](https://docs.letta.com/guides/agents/conversations
 
 ## How It Works
 
-After each response, the transcript is sent to a Letta agent via the Letta Code SDK. The agent reads files, searches the web, updates its memory — then whispers back before the next prompt. Nothing is written to CLAUDE.md.
+After each response, the transcript is sent to a Letta agent through the Letta Agent SDK. The agent reads files, searches the web, updates its memory — then whispers back before the next prompt. Nothing is written to CLAUDE.md.
 
 ```
 ┌─────────────┐          ┌──────────────────────────┐
@@ -53,6 +53,8 @@ After each response, the transcript is sent to a Letta agent via the Letta Code 
 ```
 
 ## Installation
+
+Claude Subconscious requires Node.js 22.19.0 or later.
 
 Install from GitHub:
 
@@ -298,7 +300,7 @@ Before each tool use:
 
 ### SDK Tools
 
-By default, the Subconscious agent now gets **client-side tool access** via the [Letta Code SDK](https://docs.letta.com/letta-code/sdk/). Instead of being limited to memory operations, Sub can read your files, search the web, and explore your codebase while processing transcripts.
+By default, the Subconscious agent gets **client-side tool access** through the Letta Agent SDK. Instead of being limited to memory operations, Sub can read your files, search the web, and explore your codebase while processing transcripts.
 
 **Configuration via `LETTA_SDK_TOOLS`:**
 
@@ -310,7 +312,7 @@ By default, the Subconscious agent now gets **client-side tool access** via the 
 
 In `full` mode, Sub can spawn sub-agents via the `Task` tool — dispatching parallel research or delegating work to other agents while Claude Code continues working.
 
-> **Note:** Requires `@letta-ai/letta-code-sdk` (installed as a dependency).
+> **Note:** Marketplace installs include the declared `@letta-ai/letta-agent-sdk` and `tsx` runtime dependencies.
 
 ### Stop
 
@@ -324,7 +326,7 @@ Uses an **async hook** pattern — runs in the background without blocking Claud
    - Exits immediately
 
 2. Background worker (`send_worker_sdk.ts`) runs independently:
-   - Opens a Letta Code SDK session, giving Sub client-side tools
+   - Opens a Letta Agent SDK session, giving Sub client-side tools
    - Sub processes the transcript and can use Read/Grep/Glob to explore the codebase
    - Updates state on success
    - Cleans up temp file
@@ -446,7 +448,7 @@ tail -f /tmp/letta-claude-sync-$(id -u)/send_worker_sdk.log
 ## API Notes
 
 - Memory sync requires `?include=agent.blocks` query parameter (Letta API doesn't include relationship fields by default)
-- All transcript delivery uses the [Letta Code SDK](https://docs.letta.com/letta-code/sdk/) — no raw API calls for message sending
+- All transcript delivery uses the Letta Agent SDK — no raw API calls for message sending
 - The SDK worker streams the agent's full response before updating state
 
 ## License

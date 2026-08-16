@@ -24,20 +24,21 @@
   ],
   "type": "module",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.19.0"
   },
   "scripts": {
     "sync": "tsx scripts/sync_letta_memory.ts",
     "send": "tsx scripts/send_messages_to_letta.ts",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run && npm run test:installed",
+    "test:watch": "vitest",
+    "test:installed": "tsx scripts/installed_package_check.ts"
   },
   "dependencies": {
-    "@letta-ai/letta-code-sdk": "^0.1.0",
+    "@letta-ai/letta-agent-sdk": "^0.7.1",
     "tsx": "^4.7.0"
   },
   "devDependencies": {
-    "@types/node": "^20.10.0",
+    "@types/node": "^22.19.0",
     "typescript": "^5.3.0",
     "vitest": "^3.0.0"
   }
