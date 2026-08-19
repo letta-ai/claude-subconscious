@@ -131,7 +131,7 @@ interface HarnessEvent {
 }
 ```
 
-The adapter creates a stable event ID from native identity data when the harness supplies it. Claude Code and Codex use transcript markers. Letta Code uses a native turn or event ID when available. Current Letta Code Stop hooks have no turn ID, so that adapter uses a unique occurrence ID rather than silently dropping two identical turns. This fallback cannot deduplicate an external retry of the same hook process.
+The adapter creates a stable event ID from native identity data when the harness supplies it. Every ID carries the native event name, so two kinds of event from one turn never collide. Claude Code and Codex use transcript markers, plus the prompt text on a prompt boundary, where the transcript has not yet moved. Letta Code uses a native turn or event ID when available. Current Letta Code Stop hooks have no turn ID, so that adapter uses a unique occurrence ID rather than silently dropping two identical turns. This fallback cannot deduplicate an external retry of the same hook process.
 
 Adapters send bounded turn data. They do not repeatedly send the full transcript after every turn.
 
@@ -335,7 +335,9 @@ Installation is idempotent. A hook whose command carries the `subconscious hook`
 
 Claude Code hooks provide the working directory, session ID, transcript path, and lifecycle events.
 
-The adapter observes `SessionStart` and `Stop`, and delivers on `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse`.
+The adapter observes `SessionStart`, `UserPromptSubmit`, and `Stop`, and delivers on `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse`.
+
+Observing the prompt is what puts the observer's turn beside the coding agent's rather than behind it. A prompt observation reports the `prompt` field from the hook input and nothing else. It does not read the transcript and does not advance the source cursor: at a prompt boundary that delta is the previous turn, which `Stop` already sent, and on the first prompt after a resume it is the whole transcript tail, because `SessionStart` sets no cursor. Leaving the cursor to `Stop` alone also keeps a turn's observation independent of which hook ran first. The prompt event ID carries the native event name and the prompt text, so a prompt never collides with the `Stop` of the same turn and two submissions never collapse into one.
 
 `SessionStart` and `UserPromptSubmit` read plain stdout. The tool events read only the JSON envelope. `PreCompact`, `Notification`, and `SessionEnd` discard hook output, so the adapter claims no channel for them.
 
@@ -350,6 +352,8 @@ Codex hooks and app-server events provide the working directory, thread ID, and 
 The adapter must test passive hook context against Codex CLI 0.147.0 or later.
 
 Codex 0.147.0 ships a `hookSpecificOutput` schema for `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PreToolUse`, and `PostToolUse`. The adapter delivers on the prompt boundaries and both tool events. `SubagentStart` reaches the subagent rather than the route that caused the observation, so it stays unclaimed. `PermissionRequest`, `PreCompact`, `PostCompact`, and `SessionEnd` carry no context field. The installer registers `SessionStart`, `UserPromptSubmit`, `Stop`, and both tool events in `$CODEX_HOME/hooks.json`, with `.*` as the tool matcher.
+
+The adapter observes `SessionStart`, `UserPromptSubmit`, and `Stop`. A prompt observation follows the Claude Code rule above: it reports the prompt from the hook input and leaves the transcript cursor to `Stop`. Codex 0.147.0's `user-prompt-submit.command.input` schema requires a `prompt` string and a `turn_id`, and its `stop.command.input` schema requires the same `turn_id`, so the prompt event ID carries the native event name, the turn ID, and the prompt text. A build that omits the prompt produces an observation that says so rather than an empty one.
 
 The adapter must test `thread/inject_items`, `turn/steer`, and `turn/start` against an active app-server thread. It exposes only the operations that pass.
 
@@ -380,6 +384,12 @@ The broker stores the following state:
 
 State writes are atomic. One broker process owns writes. A stale process lock recovers without deleting pending deliveries.
 
+The observation cursor advances only after the Agent SDK turn succeeds. A delivery remains pending until its adapter acknowledges it.
+
+If a failure occurs after `send()` can have reached the runtime, the broker marks the event `needs_reconciliation`. Later observations on that route stay queued. `subconscious reconcile <event-id> --retry` checks recent Letta conversations for the `otid` before it retries. If the `otid` exists, the broker binds the route to that conversation and requires explicit discard after inspection. `--discard` releases the route without another observer turn.
+
+One route maps one project configuration, Letta agent, harness type, and native harness session to one persistent Letta conversation.
+
 ### Retention
 
 State is a single file that one writer rewrites on every mutation, so anything kept forever is paid for on every later write rather than once. The broker therefore bounds both what an observation record holds and how long it is held.
@@ -398,12 +408,6 @@ The caps apply per bucket, so a burst of successful turns cannot evict a failure
 A delivery is pruned with the observation that produced it, and only once it is no longer actionable. A pending delivery that has not expired always survives, because a pending delivery must live until an adapter acknowledges it.
 
 Stored event payloads are bounded twice. At intake the broker clamps the payload: long strings are truncated, and if the result is still over budget the largest remaining top-level fields are dropped and named, so the small identity fields adapters read by name always survive. When an observation reaches `processed` or `discarded` the payload is dropped entirely, because no code path can re-prepare from those two states and a retry from `failed` or `needs_reconciliation` still needs the event as sent.
-
-The observation cursor advances only after the Agent SDK turn succeeds. A delivery remains pending until its adapter acknowledges it.
-
-If a failure occurs after `send()` can have reached the runtime, the broker marks the event `needs_reconciliation`. Later observations on that route stay queued. `subconscious reconcile <event-id> --retry` checks recent Letta conversations for the `otid` before it retries. If the `otid` exists, the broker binds the route to that conversation and requires explicit discard after inspection. `--discard` releases the route without another observer turn.
-
-One route maps one project configuration, Letta agent, harness type, and native harness session to one persistent Letta conversation.
 
 ## CLI surfaces
 
@@ -434,6 +438,15 @@ The CLI provides the following commands:
 - [x] An ambiguous send enters `needs_reconciliation` and does not retry automatically.
 - [x] Reconciliation uses the event `otid` and the stored conversation route.
 - [x] A pending delivery survives broker restart until an adapter acknowledges it.
+- [x] `queued`, `processing`, and `needs_reconciliation` observations survive retention at any age and any record count.
+- [x] Resolved observation history is bounded by both an age cap and a count cap.
+- [x] A failed observation outlives resolved history, and a burst of successful turns cannot evict it.
+- [x] Retention removes an observation from `observationOrder` whenever it removes the record.
+- [x] A pending unexpired delivery survives the pruning of the observation that produced it.
+- [x] An oversized `state.json` from an earlier build loads without error and is pruned by the first write the broker makes.
+- [x] An unbounded harness payload is clamped before it is stored, and the identity fields adapters read by name survive the clamp.
+- [x] A `processed` or `discarded` observation stores no payload.
+- [x] The drain loop selects the next observation without copying the whole state.
 
 ### Agent SDK
 
@@ -487,6 +500,10 @@ The CLI provides the following commands:
 - [x] The Codex adapter exposes only live-tested passive and queue capabilities.
 - [x] The Letta Code adapter proves passive delivery through a real turn before release.
 - [x] Each adapter reports unsupported capabilities without fallback behavior.
+- [x] Every adapter observes the user's prompt at submission, so the observation runs beside the turn that answers it rather than after it.
+- [x] A prompt observation carries the prompt text from the hook input, stays bounded, and leaves the transcript cursor unchanged.
+- [x] A prompt event ID never matches the `Stop` event ID of the same turn, and two different prompts produce two IDs.
+- [x] A prompt hook that carries no prompt text produces a labelled observation rather than an error or an empty one.
 
 ### Product validation
 

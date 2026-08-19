@@ -44,6 +44,103 @@ describe("harness adapters", () => {
     expect(prepared.text).not.toContain("first");
   });
 
+  // Both transcript-reading harnesses answer the same questions about a prompt
+  // boundary, and the only difference that matters to a caller is the label.
+  const promptAdapters: Array<{ adapter: HarnessAdapter; label: string }> = [
+    { adapter: claudeCodeAdapter, label: "Claude Code user prompt" },
+    { adapter: codexAdapter, label: "Codex user prompt" },
+  ];
+
+  it("observes a submitted prompt before the turn that answers it", async () => {
+    for (const { adapter, label } of promptAdapters) {
+      const directory = await root();
+      const transcript = join(directory, "transcript.jsonl");
+      await writeFile(
+        transcript,
+        `${JSON.stringify({ type: "user", message: { content: "earlier turn" } })}\n`,
+      );
+      const event = await adapter.normalizeHookInput({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "session",
+        cwd: directory,
+        transcript_path: transcript,
+        prompt: "Ship the release notes first.",
+      });
+      expect(event).toMatchObject({
+        harness: adapter.id,
+        type: "user_prompt",
+        sessionId: "session",
+      });
+      const prepared = await adapter.prepareObservation(event!, undefined);
+      expect(prepared.text).toBe(`${label}:\nShip the release notes first.`);
+      // The prompt is the whole observation. Reading the transcript here would
+      // resend the previous turn and move the cursor turn_stop depends on.
+      expect(prepared.text).not.toContain("earlier turn");
+      expect(prepared.nextCursor).toBeUndefined();
+    }
+  });
+
+  it("keeps a submitted prompt distinct from the Stop of the same turn", async () => {
+    for (const { adapter } of promptAdapters) {
+      const directory = await root();
+      const transcript = join(directory, "transcript.jsonl");
+      await writeFile(transcript, "{}\n");
+      // Nothing writes to the transcript between these calls, so the marker is
+      // identical and only the native name and the prompt text separate them.
+      const base = {
+        session_id: "session",
+        cwd: directory,
+        transcript_path: transcript,
+        turn_id: "turn-1",
+      };
+      const first = await adapter.normalizeHookInput({
+        ...base,
+        hook_event_name: "UserPromptSubmit",
+        prompt: "first",
+      });
+      const second = await adapter.normalizeHookInput({
+        ...base,
+        hook_event_name: "UserPromptSubmit",
+        prompt: "second",
+      });
+      const stop = await adapter.normalizeHookInput({
+        ...base,
+        hook_event_name: "Stop",
+      });
+      expect(new Set([first!.id, second!.id, stop!.id]).size).toBe(3);
+    }
+  });
+
+  it("reports a prompt event whose hook input carries no prompt text", async () => {
+    for (const { adapter, label } of promptAdapters) {
+      const event = await adapter.normalizeHookInput({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "session",
+        cwd: await root(),
+      });
+      expect(event?.type).toBe("user_prompt");
+      const prepared = await adapter.prepareObservation(event!, undefined);
+      expect(prepared.text).toBe(
+        `${label} submitted with no prompt text on the hook input.`,
+      );
+      expect(prepared.nextCursor).toBeUndefined();
+    }
+  });
+
+  it("bounds a very large submitted prompt", async () => {
+    for (const { adapter } of promptAdapters) {
+      const event = await adapter.normalizeHookInput({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "session",
+        cwd: await root(),
+        prompt: "x".repeat(40_000),
+      });
+      const prepared = await adapter.prepareObservation(event!, undefined);
+      expect(prepared.text).toContain("[truncated]");
+      expect(prepared.text.length).toBeLessThan(13_000);
+    }
+  });
+
   it("normalizes Codex hook identity", async () => {
     const directory = await root();
     const event = await codexAdapter.normalizeHookInput({

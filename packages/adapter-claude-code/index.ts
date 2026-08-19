@@ -100,9 +100,11 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     const type =
       nativeEvent === "SessionStart"
         ? "session_start"
-        : nativeEvent === "Stop"
-          ? "turn_stop"
-          : null;
+        : nativeEvent === "UserPromptSubmit"
+          ? "user_prompt"
+          : nativeEvent === "Stop"
+            ? "turn_stop"
+            : null;
     if (!type) return null;
     const sessionId = stringValue(input.session_id);
     const workingDirectory =
@@ -114,10 +116,17 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       id: eventId([
         this.id,
         sessionId,
+        // The native name separates a prompt from the Stop of the same turn,
+        // which otherwise agree on session, directory, and transcript marker.
         nativeEvent,
         workingDirectory,
         transcriptPath,
         marker,
+        // A prompt hook fires before the turn writes anything, so the marker
+        // cannot be trusted to have moved since the last event. The prompt text
+        // is what actually distinguishes two submissions. Every other event
+        // leaves it undefined, which is one constant more in the hash.
+        input.prompt,
         ...(transcriptPath ? [] : [input]),
       ]),
       harness: this.id,
@@ -138,6 +147,28 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
         text: `Claude Code session ${event.sessionId} started in ${event.workingDirectory}.`,
       };
     }
+    if (event.type === "user_prompt") {
+      // A prompt observation reports the prompt and nothing else.
+      //
+      // The transcript delta belongs to turn_stop. At a prompt boundary that
+      // delta is the previous turn, which turn_stop already sent, and on the
+      // first prompt after a resume it is the whole transcript tail, because
+      // session_start sets no cursor. Neither is the new instruction this
+      // observation exists to report, and both would be paid for on the
+      // interactive path where the user is waiting on the hook. Leaving
+      // nextCursor unset also keeps turn_stop the only writer of the cursor, so
+      // what a turn reports does not depend on which hook ran first. The prompt
+      // itself is on the hook input and reaches the observer verbatim; the next
+      // turn_stop carries it again in the surrounding turn.
+      const prompt = stringValue(event.payload.prompt);
+      return {
+        text: prompt
+          ? `Claude Code user prompt:\n${truncateText(prompt, 12_000)}`
+          : "Claude Code user prompt submitted with no prompt text on the hook input.",
+      };
+    }
+    // Everything below is the turn_stop path. The two other observed types
+    // return above, so the wording here cannot land on a prompt observation.
     const transcriptPath = stringValue(event.payload.transcript_path);
     if (!transcriptPath) {
       return {

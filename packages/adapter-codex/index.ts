@@ -78,9 +78,11 @@ export class CodexAdapter implements HarnessAdapter {
     const type =
       event === "SessionStart"
         ? "session_start"
-        : event === "Stop"
-          ? "turn_stop"
-          : null;
+        : event === "UserPromptSubmit"
+          ? "user_prompt"
+          : event === "Stop"
+            ? "turn_stop"
+            : null;
     if (!type) return null;
     const sessionId =
       stringValue(input.session_id) ?? stringValue(input.thread_id);
@@ -92,10 +94,19 @@ export class CodexAdapter implements HarnessAdapter {
       id: eventId([
         this.id,
         sessionId,
+        // The native name separates a prompt from the Stop of the same turn,
+        // which share the session, directory, turn ID, and transcript marker.
         event,
         workingDirectory,
         transcriptPath,
         await fileMarker(transcriptPath),
+        // Codex 0.147.0 requires turn_id on both prompt and Stop input, which
+        // is real native identity rather than a file marker that may not have
+        // moved yet. Its schema calls it an extension for internal turn-scoped
+        // hooks, so a command hook cannot count on a useful value; the prompt
+        // text separates two submissions on its own if the turn ID is empty.
+        input.turn_id,
+        input.prompt,
         ...(transcriptPath ? [] : [input]),
       ]),
       harness: this.id,
@@ -116,6 +127,30 @@ export class CodexAdapter implements HarnessAdapter {
         text: `Codex thread ${event.sessionId} started in ${event.workingDirectory}.`,
       };
     }
+    if (event.type === "user_prompt") {
+      // A prompt observation reports the prompt and nothing else.
+      //
+      // The transcript delta belongs to turn_stop. At a prompt boundary that
+      // delta is the previous turn, which turn_stop already sent, and on the
+      // first prompt after a resume it is the whole transcript tail, because
+      // session_start sets no cursor. Neither is the new instruction this
+      // observation exists to report, and both would be paid for on the
+      // interactive path where the user is waiting on the hook. Leaving
+      // nextCursor unset also keeps turn_stop the only writer of the cursor, so
+      // what a turn reports does not depend on which hook ran first.
+      //
+      // Codex 0.147.0's user-prompt-submit.command.input schema requires a
+      // `prompt` string, but a hook that runs against another build may not get
+      // one, so its absence is reported rather than assumed.
+      const prompt = stringValue(event.payload.prompt);
+      return {
+        text: prompt
+          ? `Codex user prompt:\n${truncateText(prompt, 12_000)}`
+          : "Codex user prompt submitted with no prompt text on the hook input.",
+      };
+    }
+    // Everything below is the turn_stop path. The two other observed types
+    // return above, so the wording here cannot land on a prompt observation.
     const transcriptPath = stringValue(event.payload.transcript_path);
     if (!transcriptPath) {
       return {
