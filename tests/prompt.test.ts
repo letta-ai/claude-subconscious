@@ -122,6 +122,40 @@ describe("observer context-management prompt", () => {
     );
   });
 
+  it("tells a mid-turn observer that the agent is still working", () => {
+    const config: ProjectConfig = {
+      version: 1,
+      agentId: "agent-observer",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages: false },
+      observer: { midTurn: { minToolCalls: 5, minSeconds: 90 } },
+    };
+    const toolResult: HarnessEvent = {
+      id: "event-tool",
+      harness: "claude-code",
+      type: "tool_result",
+      sessionId: "session-1",
+      workingDirectory: "/project",
+      occurredAt: "2026-08-18T00:00:00.000Z",
+      payload: { tool_name: "Bash" },
+    };
+
+    const prompt = formatObservationPrompt(
+      toolResult,
+      config,
+      "Claude Code is still working on this turn.",
+      ["send_whisper"],
+      "/project",
+    );
+
+    expect(prompt).toContain("in the middle of this turn");
+    expect(prompt).toContain("at its next tool boundary");
+    // Reaching a turn already in progress raises the bar rather than lowering
+    // it, so the mid-turn branch states the default more strongly.
+    expect(prompt).toContain("Silence is even more strongly the default here");
+    expect(OBSERVER_SYSTEM_PROMPT).toContain("Observing a turn in progress");
+  });
+
   it("primes a starting session with a cheatsheet instead of the usual bar", () => {
     const config: ProjectConfig = {
       version: 1,

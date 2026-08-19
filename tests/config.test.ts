@@ -119,6 +119,83 @@ describe("project configuration", () => {
     expect(await readFile(local, "utf8")).not.toContain("sandbox");
   });
 
+  it("keeps mid-turn observation off unless a project asks for it", () => {
+    expect(
+      validateProjectConfig({
+        version: 1,
+        agent_id: "agent-test",
+        observer: { mid_turn: false, mid_turn_min_tool_calls: 3 },
+      }).observer,
+    ).toEqual({});
+    expect(
+      validateProjectConfig({
+        version: 1,
+        agent_id: "agent-test",
+        observer: { mid_turn: true },
+      }).observer,
+    ).toEqual({ midTurn: { minToolCalls: 5, minSeconds: 90 } });
+    expect(
+      validateProjectConfig({
+        version: 1,
+        agent_id: "agent-test",
+        observer: {
+          mid_turn: true,
+          mid_turn_min_tool_calls: 3,
+          mid_turn_min_seconds: 30,
+        },
+      }).observer,
+    ).toEqual({ midTurn: { minToolCalls: 3, minSeconds: 30 } });
+  });
+
+  it("rejects a threshold that is not a whole number in range", () => {
+    // A throttle that silently reverts to a value the file does not name is
+    // worse than a startup error, so these fail the whole configuration.
+    const observer = (value: unknown) => ({
+      version: 1,
+      agent_id: "agent-test",
+      observer: { mid_turn: true, mid_turn_min_tool_calls: value },
+    });
+    expect(() => validateProjectConfig(observer("3"))).toThrow(
+      "mid_turn_min_tool_calls must be a number.",
+    );
+    expect(() => validateProjectConfig(observer(2.5))).toThrow(
+      "mid_turn_min_tool_calls must be a whole number of at least 1.",
+    );
+    expect(() => validateProjectConfig(observer(0))).toThrow(
+      "mid_turn_min_tool_calls must be a whole number of at least 1.",
+    );
+    expect(() =>
+      validateProjectConfig({
+        version: 1,
+        agent_id: "agent-test",
+        observer: { mid_turn: true, mid_turn_min_seconds: -1 },
+      }),
+    ).toThrow("mid_turn_min_seconds must be a whole number of at least 0.");
+  });
+
+  it("writes the mid-turn thresholds only with the switch", async () => {
+    const directory = await root();
+    const enabled = await writeProjectConfig(join(directory, "mid-turn"), {
+      version: 1,
+      agentId: "agent-test",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages: false },
+      observer: { midTurn: { minToolCalls: 3, minSeconds: 30 } },
+    });
+    expect(await loadProjectConfig(enabled)).toMatchObject({
+      observer: { midTurn: { minToolCalls: 3, minSeconds: 30 } },
+    });
+
+    const off = await writeProjectConfig(join(directory, "edges"), {
+      version: 1,
+      agentId: "agent-test",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages: false },
+      observer: {},
+    });
+    expect(await readFile(off, "utf8")).not.toContain("mid_turn");
+  });
+
   it("round-trips a written configuration", async () => {
     const directory = await root();
     const path = await writeProjectConfig(directory, {

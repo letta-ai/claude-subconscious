@@ -664,6 +664,302 @@ describe("broker lifecycle", () => {
   });
 });
 
+describe("mid-turn observation", () => {
+  async function project(midTurn?: {
+    minToolCalls: number;
+    minSeconds: number;
+  }): Promise<string> {
+    const directory = await root();
+    await writeProjectConfig(directory, {
+      version: 1,
+      agentId: "agent-mid-turn",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages: false },
+      observer: { ...(midTurn ? { midTurn } : {}) },
+    });
+    return directory;
+  }
+
+  function socket(directory: string, name: string): BrokerDescriptor {
+    return {
+      version: 1,
+      endpoint:
+        process.platform === "win32"
+          ? `\\\\.\\pipe\\subconscious-test-${randomUUID()}`
+          : join(directory, `${name}.sock`),
+      token: "test-token",
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    };
+  }
+
+  function toolEvent(directory: string, index: number) {
+    return {
+      id: `tool-${index}`,
+      harness: "claude-code" as const,
+      type: "tool_result" as const,
+      sessionId: "session-mid",
+      workingDirectory: directory,
+      occurredAt: new Date().toISOString(),
+      payload: { session_id: "session-mid", cwd: directory, tool_name: "Bash" },
+    };
+  }
+
+  async function state(descriptor: BrokerDescriptor) {
+    const response = await sendBrokerRequest(descriptor, { type: "status" });
+    if (!response.ok || response.type !== "status")
+      throw new Error("Missing broker status.");
+    return response.state;
+  }
+
+  function successfulRun(): RunObservationResult {
+    return {
+      status: "success",
+      conversationId: "conv-observer",
+      result: {
+        type: "result",
+        success: true,
+        durationMs: 1,
+        conversationId: "conv-observer",
+        runIds: ["run-observer"],
+      },
+    };
+  }
+
+  it("collapses a burst of tool calls into at most two observer turns", async () => {
+    // Every queued observation on one route reads the same transcript delta, so
+    // a second one behind the first has nothing left to report. The broker
+    // therefore folds them: one record can be running while one collects, and
+    // that is the whole cost of a busy turn.
+    const directory = await project({ minToolCalls: 1, minSeconds: 0 });
+    const descriptor = socket(directory, "coalesce");
+    let turns = 0;
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime: {
+        run: async (): Promise<RunObservationResult> => {
+          turns += 1;
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          return successfulRun();
+        },
+      },
+    });
+    await broker.start();
+    try {
+      for (let index = 0; index < 20; index += 1) {
+        await sendBrokerRequest(descriptor, {
+          type: "observe",
+          event: toolEvent(directory, index),
+        });
+      }
+      await waitFor(async () => {
+        const observations = Object.values(
+          (await state(descriptor)).observations,
+        );
+        return observations.every(
+          (observation) =>
+            observation.status !== "queued" &&
+            observation.status !== "processing",
+        );
+      }, 5_000);
+
+      const observations = Object.values(
+        (await state(descriptor)).observations,
+      );
+      expect(observations.length).toBeLessThanOrEqual(2);
+      expect(turns).toBeLessThanOrEqual(2);
+      // All twenty are accounted for: the records together stand for every
+      // tool call the harness reported.
+      const represented = observations.reduce(
+        (total, observation) => total + (observation.coalesced ?? 0) + 1,
+        0,
+      );
+      expect(represented).toBe(20);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("holds a mid-turn record below the configured thresholds", async () => {
+    const directory = await project({ minToolCalls: 5, minSeconds: 0 });
+    const descriptor = socket(directory, "gate");
+    let turns = 0;
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime: {
+        run: async (): Promise<RunObservationResult> => {
+          turns += 1;
+          return successfulRun();
+        },
+      },
+    });
+    await broker.start();
+    try {
+      for (let index = 0; index < 4; index += 1) {
+        await sendBrokerRequest(descriptor, {
+          type: "observe",
+          event: toolEvent(directory, index),
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const waiting = (await state(descriptor)).observations["tool-0"];
+      expect(turns).toBe(0);
+      expect(waiting?.status).toBe("queued");
+      expect(waiting?.coalesced).toBe(3);
+      // Folding replaces the event and keeps the record's identity, so the
+      // OTID reconciliation searches for is still the one the send will use.
+      expect(waiting?.otid).toBe("tool-0");
+      expect(waiting?.event.id).toBe("tool-0");
+      expect(Object.keys((await state(descriptor)).observations)).toEqual([
+        "tool-0",
+      ]);
+
+      await sendBrokerRequest(descriptor, {
+        type: "observe",
+        event: toolEvent(directory, 4),
+      });
+      await waitFor(
+        async () =>
+          (await state(descriptor)).observations["tool-0"]?.status ===
+          "processed",
+      );
+      expect(turns).toBe(1);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("discards a queued mid-turn record when the turn stops", async () => {
+    const directory = await project({ minToolCalls: 5, minSeconds: 0 });
+    const descriptor = socket(directory, "supersede");
+    let turns = 0;
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime: {
+        run: async (): Promise<RunObservationResult> => {
+          turns += 1;
+          return successfulRun();
+        },
+      },
+    });
+    await broker.start();
+    try {
+      for (let index = 0; index < 2; index += 1) {
+        await sendBrokerRequest(descriptor, {
+          type: "observe",
+          event: toolEvent(directory, index),
+        });
+      }
+      await sendBrokerRequest(descriptor, {
+        type: "observe",
+        event: {
+          id: "stop-1",
+          harness: "claude-code",
+          type: "turn_stop",
+          sessionId: "session-mid",
+          workingDirectory: directory,
+          occurredAt: new Date().toISOString(),
+          payload: {},
+        },
+      });
+      await waitFor(
+        async () =>
+          (await state(descriptor)).observations["stop-1"]?.status ===
+          "processed",
+      );
+      // The Stop delta contains everything the mid-turn record was holding, so
+      // running both would spend a turn on an empty observation.
+      const superseded = (await state(descriptor)).observations["tool-0"];
+      expect(superseded?.status).toBe("discarded");
+      expect(superseded?.error).toContain("Superseded");
+      expect(turns).toBe(1);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("refuses a tool boundary when the project has not enabled it", async () => {
+    const directory = await project();
+    const descriptor = socket(directory, "off");
+    let turns = 0;
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime: {
+        run: async (): Promise<RunObservationResult> => {
+          turns += 1;
+          return successfulRun();
+        },
+      },
+    });
+    await broker.start();
+    try {
+      const refused = await sendBrokerRequest(descriptor, {
+        type: "observe",
+        event: toolEvent(directory, 0),
+      });
+      expect(refused).toMatchObject({
+        ok: true,
+        type: "observed",
+        accepted: false,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      // Nothing is recorded at all: no observation, and no route either, so a
+      // project without the flag stores what it always stored.
+      const current = await state(descriptor);
+      expect(Object.keys(current.observations)).toHaveLength(0);
+      expect(Object.keys(current.routes)).toHaveLength(0);
+      expect(turns).toBe(0);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("releases a mid-turn record the previous broker left queued", async () => {
+    const directory = await project({ minToolCalls: 5, minSeconds: 0 });
+    const descriptor = socket(directory, "stranded");
+    const runtime = {
+      run: async (): Promise<RunObservationResult> => successfulRun(),
+    };
+    let broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime,
+    });
+    await broker.start();
+    try {
+      await sendBrokerRequest(descriptor, {
+        type: "observe",
+        event: toolEvent(directory, 0),
+      });
+      expect((await state(descriptor)).observations["tool-0"]?.status).toBe(
+        "queued",
+      );
+    } finally {
+      await broker.close();
+    }
+
+    broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime,
+    });
+    await broker.start();
+    try {
+      // Retention never prunes a queued record, and the turn it belonged to is
+      // over, so it would otherwise sit there for good.
+      expect((await state(descriptor)).observations["tool-0"]?.status).toBe(
+        "discarded",
+      );
+    } finally {
+      await broker.close();
+    }
+  });
+});
+
 describe("session status claim", () => {
   it("hands the session identity to the first caller only", async () => {
     const directory = await root();

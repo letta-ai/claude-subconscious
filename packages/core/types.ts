@@ -26,6 +26,33 @@ export interface DeliveryConfig {
   queueMessages: boolean;
 }
 
+/**
+ * When a mid-turn observation has earned an observer turn.
+ *
+ * A mid-turn observation is coalescing by construction: `prepareObservation`
+ * reads the route's transcript delta when the turn runs, not when the event
+ * arrives, so two queued observations on one route would have the first consume
+ * the whole delta and the second report nothing. The broker therefore keeps at
+ * most one queued mid-turn record per route and folds every later tool result
+ * into it. These two thresholds decide when that record is worth a Letta turn.
+ */
+export interface MidTurnObservationConfig {
+  /**
+   * How many tool results one record must represent before it runs.
+   *
+   * The record already covers everything since the last observation, so a low
+   * value buys nothing except more observer turns over the same transcript.
+   */
+  minToolCalls: number;
+  /**
+   * The quiet period after the route's previous observer turn ended.
+   *
+   * This is the cadence control. It bounds how many observer turns one long
+   * coding-agent turn can cost, whatever the tool count does.
+   */
+  minSeconds: number;
+}
+
 export interface ObserverConfig {
   instructions?: string;
   /**
@@ -36,6 +63,15 @@ export interface ObserverConfig {
    * MemFS and loses every project file. An absent key means local execution.
    */
   sandbox?: boolean;
+  /**
+   * Observe tool boundaries inside a turn, not only the turn's edges.
+   *
+   * Absent means off, which is the only behavior earlier versions had: the
+   * observer sees a session start, a prompt, and a completed turn, and says
+   * nothing during the minutes between the last two. Present means on, and the
+   * thresholds it carries are what keep it affordable.
+   */
+  midTurn?: MidTurnObservationConfig;
 }
 
 export interface ProjectConfig {
@@ -107,6 +143,16 @@ export interface RouteRecord {
   runtimeReportedTools?: string[];
   attachedServerTools?: string[];
   sourceCursor?: SourceCursor;
+  /**
+   * When this route's last observer turn finished, whatever its outcome.
+   *
+   * Only the mid-turn gate reads it, and only a path that actually reached the
+   * runtime writes it: a failure before the turn started spent nothing and must
+   * not delay a real observation. It is written only for a project that enables
+   * mid-turn observation, so a project without the flag stores exactly the route
+   * it stored before the flag existed.
+   */
+  lastObservedAt?: string;
   statusSentAt?: string;
   createdAt: string;
   updatedAt: string;
@@ -149,6 +195,22 @@ export interface ObservationRecord {
   otid: string;
   error?: string;
   runIds?: string[];
+  /**
+   * How many later tool results were folded into this record while it waited.
+   *
+   * Absent means none, so the record stands for one event. The record therefore
+   * represents `coalesced + 1` tool results, which is what the readiness gate
+   * compares against `minToolCalls`.
+   *
+   * Folding keeps `id`, `otid`, and `createdAt` and replaces `event`, so the
+   * record's ID no longer hashes the payload it now holds. That is deliberate:
+   * the ID is the Agent SDK `otid` for the turn this record will run, and
+   * reconciliation searches Letta for `otid`. Rewriting it on every fold would
+   * change the identity of a record that has not been sent yet, and a crash
+   * between the fold and the send would leave `reconcile` searching for an
+   * `otid` the broker never used.
+   */
+  coalesced?: number;
 }
 
 export type DeliveryKind = "whisper" | "queued_message";

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -138,6 +138,152 @@ describe("harness adapters", () => {
       const prepared = await adapter.prepareObservation(event!, undefined);
       expect(prepared.text).toContain("[truncated]");
       expect(prepared.text.length).toBeLessThan(13_000);
+    }
+  });
+
+  // Mid-turn observation is the same contract in both transcript harnesses:
+  // PostToolUse becomes a tool_result event carrying route identity only.
+  const midTurnAdapters: Array<{ adapter: HarnessAdapter; label: string }> = [
+    { adapter: claudeCodeAdapter, label: "Claude Code" },
+    { adapter: codexAdapter, label: "Codex" },
+  ];
+
+  it("observes a finished tool call without storing the tool payload", async () => {
+    for (const { adapter } of midTurnAdapters) {
+      const directory = await root();
+      const transcript = join(directory, "transcript.jsonl");
+      await writeFile(transcript, "{}\n");
+      const event = await adapter.normalizeHookInput({
+        hook_event_name: "PostToolUse",
+        session_id: "session",
+        cwd: directory,
+        transcript_path: transcript,
+        tool_name: "Bash",
+        tool_input: { command: "x".repeat(50_000) },
+        tool_response: { stdout: "y".repeat(50_000) },
+      });
+      expect(event).toMatchObject({
+        harness: adapter.id,
+        type: "tool_result",
+        sessionId: "session",
+      });
+      // The transcript delta already contains the call and its result, so the
+      // unbounded fields are never worth a place in durable state.
+      expect(event!.payload).toEqual({
+        session_id: "session",
+        cwd: directory,
+        transcript_path: transcript,
+        tool_name: "Bash",
+      });
+    }
+  });
+
+  it("marks a failed tool call on the mid-turn event", async () => {
+    for (const { adapter } of midTurnAdapters) {
+      const event = await adapter.normalizeHookInput({
+        hook_event_name: "PostToolUse",
+        session_id: "session",
+        cwd: await root(),
+        tool_name: "Bash",
+        tool_response: { is_error: true, error: "exit 1" },
+      });
+      expect(event!.payload.tool_error).toBe(true);
+      expect(
+        (await adapter.prepareObservation(event!, undefined)).text,
+      ).toContain("reported an error");
+    }
+  });
+
+  it("reports the mid-turn transcript delta and advances the cursor", async () => {
+    for (const { adapter, label } of midTurnAdapters) {
+      const directory = await root();
+      const transcript = join(directory, "transcript.jsonl");
+      const first = `${JSON.stringify({ type: "user", message: { content: "earlier" } })}\n`;
+      await writeFile(
+        transcript,
+        `${first}${JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "mid-turn work" }] } })}\n`,
+      );
+      const event = await adapter.normalizeHookInput({
+        hook_event_name: "PostToolUse",
+        session_id: "session",
+        cwd: directory,
+        transcript_path: transcript,
+        tool_name: "Read",
+      });
+      const prepared = await adapter.prepareObservation(event!, {
+        offset: Buffer.byteLength(first),
+      });
+      expect(prepared.text).toContain(`${label} is still working on this turn`);
+      expect(prepared.text).toContain("Read");
+      expect(prepared.text).toContain("mid-turn work");
+      expect(prepared.text).not.toContain("earlier");
+      // The delta this observation consumed is the delta the next turn_stop
+      // would have resent, so the cursor has to move with it.
+      expect(prepared.nextCursor?.offset).toBe(
+        Buffer.byteLength(await readFile(transcript, "utf8")),
+      );
+    }
+  });
+
+  it("keeps two tool calls in one turn distinct", async () => {
+    for (const { adapter } of midTurnAdapters) {
+      const directory = await root();
+      const transcript = join(directory, "transcript.jsonl");
+      await writeFile(transcript, "{}\n");
+      // Nothing writes to the transcript between these calls, so the marker is
+      // identical and only the call itself separates them.
+      const base = {
+        hook_event_name: "PostToolUse",
+        session_id: "session",
+        cwd: directory,
+        transcript_path: transcript,
+        turn_id: "turn-1",
+      };
+      const read = await adapter.normalizeHookInput({
+        ...base,
+        tool_name: "Read",
+        tool_input: { file_path: "a.ts" },
+      });
+      const other = await adapter.normalizeHookInput({
+        ...base,
+        tool_name: "Read",
+        tool_input: { file_path: "b.ts" },
+      });
+      const stop = await adapter.normalizeHookInput({
+        ...base,
+        hook_event_name: "Stop",
+      });
+      expect(new Set([read!.id, other!.id, stop!.id]).size).toBe(3);
+    }
+  });
+
+  it("leaves PreToolUse unobserved", async () => {
+    for (const { adapter } of midTurnAdapters) {
+      // Nothing has happened yet when PreToolUse fires, so its delta is the one
+      // the previous PostToolUse already reported.
+      await expect(
+        adapter.normalizeHookInput({
+          hook_event_name: "PreToolUse",
+          session_id: "session",
+          cwd: await root(),
+          tool_name: "Bash",
+        }),
+      ).resolves.toBeNull();
+    }
+  });
+
+  it("does not observe Letta Code tool boundaries", async () => {
+    // Letta Code formats its observations from the hook payload and keeps no
+    // transcript cursor, so coalescing tool events there would drop payloads.
+    for (const event of ["PreToolUse", "PostToolUse", "PostToolUseFailure"]) {
+      await expect(
+        lettaCodeAdapter.normalizeHookInput({
+          event_type: event,
+          working_directory: await root(),
+          conversation_id: "conv-parent",
+          tool_name: "Bash",
+        }),
+      ).resolves.toBeNull();
     }
   });
 

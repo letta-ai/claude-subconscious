@@ -181,7 +181,8 @@ export async function runHook(harness: HarnessId): Promise<void> {
   const input = enrichHookInput(raw, harness);
   const target = targetFor(harness, input);
   if (!target) return;
-  if (!(await findProjectConfig(target.workingDirectory))) return;
+  const project = await findProjectConfig(target.workingDirectory);
+  if (!project) return;
   const descriptor = await ensureBroker();
   const event = nativeEvent(input);
 
@@ -225,7 +226,14 @@ export async function runHook(harness: HarnessId): Promise<void> {
   }
 
   const observation = await adapter.normalizeHookInput(input);
-  if (observation) {
+  // A tool boundary is observed only where the project asked for it. The broker
+  // refuses the event anyway, so this is not the check that enforces the flag;
+  // it keeps a project without the flag from paying a broker round trip on
+  // every tool call to be told no.
+  const wanted =
+    observation?.type !== "tool_result" ||
+    Boolean(project.config.observer.midTurn);
+  if (observation && wanted) {
     await sendBrokerRequest(descriptor, {
       type: "observe",
       event: observation,

@@ -94,6 +94,17 @@ Subconscious walks from the harness working directory toward the filesystem root
 
 Add `sandbox = true` under `[observer]` to run the observer's tools in a Letta managed sandbox instead of on this machine. The sandbox does not mount the project, so the observer keeps its MemFS and can no longer read project files. Leave the key out for local tools and full project access.
 
+By default the observer sees a session start, a prompt, and a completed turn. Add `mid_turn = true` under `[observer]` to also observe tool boundaries inside a turn, so a whisper can reach the coding agent while it is still working instead of waiting for the next prompt. Two settings control what that costs:
+
+```toml
+[observer]
+mid_turn = true
+mid_turn_min_tool_calls = 5
+mid_turn_min_seconds = 90
+```
+
+`mid_turn_min_tool_calls` is how many tool calls one observation must cover before it runs. `mid_turn_min_seconds` is the quiet period after the observer's previous turn on that session. Both must pass. Raise either one to spend fewer observer turns on a busy session.
+
 Two configurations can use one observer agent. Those projects share the agent's memory. Use separate agent IDs for project memory isolation.
 
 ## Install an adapter

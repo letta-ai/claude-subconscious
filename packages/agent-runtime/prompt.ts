@@ -41,6 +41,14 @@ Retrieve the project's system/ files and send one compact cheatsheet covering wh
 
 Keep it dense and skimmable. Drop any section you have nothing real for. If MemFS holds nothing about this project, send nothing.
 
+## Observing a turn in progress
+
+A tool_result observation arrives while the coding agent is still working. It has not stopped, it will run more tools, and a whisper you send now reaches it within seconds at its next tool boundary rather than at the next prompt.
+
+That reach is the reason to be stricter, not looser. The agent is mid-task and holds the whole session already. Deliver only what changes its next step: a constraint it is about to violate, an approach that already failed here, or a decision it is contradicting without knowing. Anything that can wait for the completed turn should wait for it, because the turn boundary is where a full account of the work arrives.
+
+Silence is the normal outcome everywhere. Here it is the outcome almost every time.
+
 ## MemFS
 
 Use MemFS as the durable source of project context. Keep compact, frequently needed facts under system/. Put detailed decisions, explanations, incidents, and history under reference/. Link from system/ to relevant reference files when useful. Give every file frontmatter with a description that says what the file contains and when to load it. These are MemFS files, not memory blocks. Do not store secrets, raw transcripts, routine progress, or temporary details that have no future value.
@@ -62,6 +70,10 @@ export function formatObservationPrompt(
 ): string {
   const instructions = config.observer.instructions?.trim();
   const priming = event.type === "session_start";
+  // A mid-turn observation is the one case where the coding agent is running
+  // while the observer thinks, so it gets its own framing: the whisper lands
+  // sooner and interrupts more, which raises the bar rather than lowering it.
+  const midTurn = event.type === "tool_result";
   return [
     `Subconscious observation for ${event.harness} session ${event.sessionId}.`,
     // The sandbox carries MemFS but not the project checkout, so the observer
@@ -74,11 +86,15 @@ export function formatObservationPrompt(
     `<harness_observation event_id="${event.id}" type="${event.type}">\n${observation}\n</harness_observation>`,
     priming
       ? "This session is starting. Prime the coding agent before it works: read the project's system/ files and prepare one compact cheatsheet of what it cannot infer from the repository in front of it."
-      : "Use this observation to maintain MemFS and prepare relevant context for the next coding-agent turn.",
+      : midTurn
+        ? "The coding agent is in the middle of this turn. It is still working and will run more tools. Use this observation to maintain MemFS and to decide whether anything you hold has to reach the agent before it finishes."
+        : "Use this observation to maintain MemFS and prepare relevant context for the next coding-agent turn.",
     "Check MemFS for information tied to the active task. Route new durable information to the narrowest useful file with memory_apply_patch.",
     priming
       ? "Deliver that cheatsheet with send_whisper so it reaches the first turn. Send nothing if MemFS holds nothing about this project."
-      : "Use send_whisper only when you hold something the coding agent cannot know from this session alone. Name that thing before you call the tool. Silence is the normal outcome.",
+      : midTurn
+        ? "A whisper sent now reaches the agent within seconds, at its next tool boundary, instead of waiting for the next prompt. Send one only for something that changes the step it is about to take and that it cannot know from this session. Everything else waits for the completed turn. Silence is even more strongly the default here."
+        : "Use send_whisper only when you hold something the coding agent cannot know from this session alone. Name that thing before you call the tool. Silence is the normal outcome.",
   ]
     .filter((part): part is string => Boolean(part))
     .join("\n\n");

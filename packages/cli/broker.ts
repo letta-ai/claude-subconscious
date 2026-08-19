@@ -11,6 +11,7 @@ import {
   type BrokerDescriptor,
   type BrokerRequest,
   type BrokerResponse,
+  type BrokerState,
   type DeliveryRecord,
   type DeliveryTarget,
   type HarnessEvent,
@@ -57,6 +58,55 @@ function cloneOrNull<T>(value: T | undefined): T | null {
   return value ? structuredClone(value) : null;
 }
 
+/**
+ * The mid-turn observation already waiting on a route, if there is one.
+ *
+ * There is at most one, because this is exactly what `observe` folds into. A
+ * record that has reached `processing` is not a candidate: its turn is running
+ * and its transcript delta is already being consumed, so a later tool result
+ * has to start a new record. That bounds a route to two mid-turn records at
+ * once, one running and one collecting.
+ */
+function queuedMidTurn(
+  state: BrokerState,
+  routeKey: string,
+): ObservationRecord | undefined {
+  for (const record of Object.values(state.observations)) {
+    if (record.routeKey !== routeKey) continue;
+    if (record.status !== "queued") continue;
+    if (record.event.type === "tool_result") return record;
+  }
+  return undefined;
+}
+
+/**
+ * Whether a queued mid-turn observation has earned an observer turn yet.
+ *
+ * Both thresholds have to pass. The count says the record covers enough work to
+ * be worth reading; the quiet period says the route has not just been observed.
+ * A record whose project has since turned the feature off never runs at all,
+ * which is what keeps a stale queue from firing after a configuration change.
+ *
+ * There is no timer behind this. The gate is re-read whenever the agent's drain
+ * loop finishes, and `observe` schedules that loop on every later tool call, so
+ * the record is reconsidered at the next tool boundary after it becomes ready.
+ */
+function midTurnReady(
+  observation: ObservationRecord,
+  route: RouteRecord,
+  nowMs: number,
+): boolean {
+  const settings = observation.config.observer.midTurn;
+  if (!settings) return false;
+  if ((observation.coalesced ?? 0) + 1 < settings.minToolCalls) return false;
+  if (!route.lastObservedAt) return true;
+  const since = nowMs - Date.parse(route.lastObservedAt);
+  // An unparseable timestamp compares false here and lets the record through.
+  // The gate exists to space observer turns out, not to strand one behind a
+  // value nothing can interpret.
+  return !(since < settings.minSeconds * 1_000);
+}
+
 export class SubconsciousBroker {
   private readonly descriptor: BrokerDescriptor;
   private readonly store: StateStore;
@@ -82,6 +132,7 @@ export class SubconsciousBroker {
 
   async start(): Promise<void> {
     await this.store.recoverInterrupted();
+    await this.discardStrandedMidTurn();
     this.server = await createBrokerServer(this.descriptor, (request) =>
       this.handle(request),
     );
@@ -99,6 +150,42 @@ export class SubconsciousBroker {
         .map((delivery) => delivery.routeKey),
     );
     for (const key of stranded) this.track(this.deliverQueuedMessages(key));
+  }
+
+  /**
+   * Release mid-turn records the previous broker left queued.
+   *
+   * A mid-turn observation only means something inside the turn that produced
+   * it, and that turn ended with the process that was watching it. Its
+   * transcript delta is not lost: the cursor never moved, so the session's next
+   * turn boundary reports it. Without this the record would sit queued forever,
+   * because retention deliberately never prunes a queued observation and the
+   * readiness gate has no reason to release one whose route went quiet.
+   *
+   * The scan runs before the socket opens, and it writes only when it found
+   * something, so a broker with no such records writes nothing here.
+   */
+  private async discardStrandedMidTurn(): Promise<void> {
+    const stranded = await this.store.read((state) =>
+      Object.values(state.observations)
+        .filter(
+          (record) =>
+            record.status === "queued" && record.event.type === "tool_result",
+        )
+        .map((record) => record.event.id),
+    );
+    if (stranded.length === 0) return;
+    await this.store.update((state) => {
+      const timestamp = now();
+      for (const id of stranded) {
+        const record = state.observations[id];
+        if (!record || record.status !== "queued") continue;
+        record.status = "discarded";
+        record.error =
+          "The broker restarted before this mid-turn observation ran. Its transcript delta reaches the next turn boundary instead.";
+        record.updatedAt = timestamp;
+      }
+    });
   }
 
   /**
@@ -160,6 +247,19 @@ export class SubconsciousBroker {
         reason: `Configuration ${project.path} has no agent_id. Run subconscious init.`,
       };
     }
+    // Mid-turn observation is refused before any state is touched, so a project
+    // that has not asked for it stores exactly what it stored before the
+    // feature existed. The hook checks the same flag to save itself the round
+    // trip, but configuration is only authoritative here, and a hook running
+    // against a file that has since changed must not be able to enable it.
+    if (event.type === "tool_result" && !project.config.observer.midTurn) {
+      return {
+        ok: true,
+        type: "observed",
+        accepted: false,
+        reason: `Configuration ${project.path} does not enable observer.mid_turn.`,
+      };
+    }
     const identity = {
       configPath: project.path,
       projectRoot: project.projectRoot,
@@ -190,22 +290,64 @@ export class SubconsciousBroker {
       // input has no conversation fields, and clearing the route on one of
       // those would strand every queued message the session later earns.
       if (harnessIdentity) state.routes[key]!.harnessIdentity = harnessIdentity;
-      state.observations[event.id] = {
-        // The stored payload is clamped, not the one the route identity was
-        // read from above. `prepareObservation` runs later against this record,
-        // so what is stored is what an adapter will see, and a harness payload
-        // has no size an adapter can rely on.
-        event: { ...event, payload: boundPayload(event.payload) },
-        routeKey: key,
-        config: project.config,
-        status: "queued",
-        attempts: 0,
-        createdAt: timestamp,
-        updatedAt: timestamp,
-        otid: event.id,
-      };
-      state.observationOrder.push(event.id);
-      accepted = true;
+      // The stored payload is clamped, not the one the route identity was read
+      // from above. `prepareObservation` runs later against this record, so what
+      // is stored is what an adapter will see, and a harness payload has no size
+      // an adapter can rely on.
+      const bounded = { ...event, payload: boundPayload(event.payload) };
+
+      const existing =
+        event.type === "tool_result" ? queuedMidTurn(state, key) : undefined;
+      if (existing) {
+        // Fold this tool result into the record already waiting instead of
+        // queueing a second one. Two queued observations on one route are
+        // redundant by construction: the first to run consumes the whole
+        // transcript delta and the second reports an empty turn.
+        //
+        // The record keeps its ID, its `otid`, and its `createdAt` while its
+        // event is replaced, so the ID no longer hashes the payload it holds.
+        // That is the point. The ID is the `otid` this record will send under,
+        // and `subconscious reconcile` searches Letta for that `otid`. A new ID
+        // per fold would change the identity of a record that has not been sent
+        // yet. `observationOrder` is not touched either: the record is already
+        // in it, and appending would list it twice.
+        existing.event = { ...bounded, id: existing.event.id };
+        existing.config = project.config;
+        existing.coalesced = (existing.coalesced ?? 0) + 1;
+        existing.updatedAt = timestamp;
+        accepted = true;
+      } else {
+        state.observations[event.id] = {
+          event: bounded,
+          routeKey: key,
+          config: project.config,
+          status: "queued",
+          attempts: 0,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          otid: event.id,
+        };
+        state.observationOrder.push(event.id);
+        accepted = true;
+      }
+
+      if (event.type === "turn_stop") {
+        // The Stop delta contains everything a queued mid-turn record on this
+        // route was waiting to report, so running both would spend a Letta turn
+        // on an observation that reads "nothing new since the last one". This
+        // is not guarded by the mid-turn flag: turning the flag off has to
+        // release records the previous configuration left behind, which the
+        // readiness gate alone would hold queued forever.
+        for (const record of Object.values(state.observations)) {
+          if (record.routeKey !== key) continue;
+          if (record.status !== "queued") continue;
+          if (record.event.type !== "tool_result") continue;
+          record.status = "discarded";
+          record.error =
+            "Superseded by the completed turn, whose transcript delta contains this one.";
+          record.updatedAt = timestamp;
+        }
+      }
     });
     if (accepted) this.schedule(agentId);
     return { ok: true, type: "observed", accepted };
@@ -228,6 +370,7 @@ export class SubconsciousBroker {
     // The drain loop calls this once per observation, so it reads the live
     // state and copies only the record it selects. Cloning the whole state here
     // made one drain cost time proportional to the entire observation history.
+    const nowMs = Date.now();
     return await this.store.read((state) => {
       const blockedRoutes = new Set(
         Object.values(state.observations)
@@ -241,7 +384,16 @@ export class SubconsciousBroker {
         if (!observation || observation.status !== "queued") continue;
         if (blockedRoutes.has(observation.routeKey)) continue;
         const route = state.routes[observation.routeKey];
-        if (route?.agentId === agentId) return structuredClone(observation);
+        if (!route || route.agentId !== agentId) continue;
+        // A mid-turn record that is not ready is skipped, not held: a later
+        // turn boundary on the same route is still free to run ahead of it.
+        if (
+          observation.event.type === "tool_result" &&
+          !midTurnReady(observation, route, nowMs)
+        ) {
+          continue;
+        }
+        return structuredClone(observation);
       }
       return null;
     });
@@ -319,11 +471,20 @@ export class SubconsciousBroker {
       });
       return false;
     }
+    // The observer turn is over, whatever it returned. Only the mid-turn gate
+    // reads this, and only a project that enabled mid-turn observation stores
+    // it, so a project without the flag keeps the route it always had. It is
+    // written from here rather than from where the turn started, so a slow turn
+    // does not immediately earn the next one, and it is not written on the
+    // paths above, which failed before reaching the runtime and spent nothing.
+    const observedAt = observation.config.observer.midTurn ? now() : null;
+
     if (result.status === "success") {
       await this.store.update((current) => {
         const record = current.observations[observation.event.id];
         const currentRoute = current.routes[observation.routeKey];
         if (!record || !currentRoute) return;
+        if (observedAt) currentRoute.lastObservedAt = observedAt;
         record.status = "processed";
         record.updatedAt = now();
         record.runIds = result.result.runIds;
@@ -351,6 +512,7 @@ export class SubconsciousBroker {
       record.error = result.error;
       record.updatedAt = now();
       if (result.result?.runIds) record.runIds = result.result.runIds;
+      if (currentRoute && observedAt) currentRoute.lastObservedAt = observedAt;
       if (currentRoute && result.conversationId) {
         currentRoute.conversationId = result.conversationId;
         currentRoute.updatedAt = now();

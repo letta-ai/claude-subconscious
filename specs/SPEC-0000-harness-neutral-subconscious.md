@@ -43,6 +43,12 @@ The broker outlives the code that started it. Its descriptor therefore records w
 
 The fingerprint is the entry point's path and modification time. It catches a different install location, an upgrade, and a rebuild. It does not catch editing a source file the entry point does not import directly, so `subconscious restart` remains the explicit control.
 
+Observation inside a turn coalesces instead of queueing. An adapter's `prepareObservation` reads the route's transcript delta when the observer turn runs, not when the event arrives, so two queued mid-turn observations on one route are redundant by construction: the first consumes the whole delta and the second reports an empty one. The broker therefore keeps at most one queued mid-turn record per route and folds every later tool result into it. A record that has already started running is not a fold target, which bounds a route to two mid-turn records at once, one running and one collecting.
+
+A folded record keeps its ID, its `otid`, and its creation time while its event is replaced. The ID is the `otid` the record will send under and the key reconciliation searches Letta for, so rewriting it on every fold would change the identity of a record the broker has not sent yet.
+
+A queued mid-turn record runs only once it clears both thresholds: how many tool results it stands for, and the quiet period since the route's last observer turn ended. No timer is involved. The readiness gate is re-read whenever the drain loop finishes, and every later tool call schedules that loop, so a ready record runs at the next tool boundary. A completed turn discards the queued mid-turn record it supersedes, because the `Stop` delta already contains everything that record was waiting to report. A broker restart discards whatever mid-turn records it finds queued: the turn they described ended with the process that was watching it, and their transcript delta is not lost, because the cursor never moved and the session's next turn boundary reports it.
+
 ## Package boundaries
 
 The rewrite uses the following packages:
@@ -87,6 +93,9 @@ queue_messages = false
 [observer]
 instructions = "Focus on regressions and forgotten project decisions."
 sandbox = false
+mid_turn = false
+mid_turn_min_tool_calls = 5
+mid_turn_min_seconds = 90
 ```
 
 `observer.sandbox` chooses where the observer's tools run. It is off by default, and an absent key means the tools run in the broker process against the project root, which is the only behavior earlier versions had.
@@ -96,6 +105,12 @@ When it is on, the runtime opens the session through a Cloud client that owns a 
 The bundled toolset does not change. MemFS is a filesystem projection that travels with the agent, so `Read`, `LS`, `Glob`, and `Grep` are how the observer retrieves memory wherever it runs. Removing them would leave an observer that can write memory and never read it. The delivery tools execute in the broker process over the external-tool protocol, so they behave the same on both transports.
 
 A sandboxed session sends no `cwd` and no session `env`. The project root does not exist in the sandbox, cloud transports ignore session env, and the Cloud client carries the credential instead.
+
+`observer.mid_turn` chooses whether the observer sees tool boundaries inside a turn. It is off by default, and an absent key means the observer sees a session start, a prompt, and a completed turn, and says nothing during the minutes between the last two, which is the only behavior earlier versions had.
+
+`mid_turn_min_tool_calls` and `mid_turn_min_seconds` are what make it affordable. The first is how many tool results one coalesced record must stand for before it earns a Letta turn. The second is the quiet period after the route's previous observer turn ended, which is the cadence control: it bounds how many observer turns one long coding-agent turn can cost, whatever the tool count does. Both are floors and both must pass. They default to five calls and ninety seconds, and a project that turns the feature on writes both out with the switch rather than only when they differ, because they are the whole cost control.
+
+The thresholds are validated whether or not the switch is on, so a typo in a file with the feature off is still reported. A value that is not a whole number in range fails configuration loading and names the key. It does not fall back to the default: a throttle silently reverting to something the file does not say is worse than a startup error.
 
 The CLI can create a dedicated observer agent when `agent_id` is absent. Agent creation uses `model: "letta/auto"`, MemFS, and `baseTools: []`. It does not supply legacy memory block inputs or attach server-side tools.
 
@@ -134,6 +149,8 @@ interface HarnessEvent {
 The adapter creates a stable event ID from native identity data when the harness supplies it. Every ID carries the native event name, so two kinds of event from one turn never collide. Claude Code and Codex use transcript markers, plus the prompt text on a prompt boundary, where the transcript has not yet moved. Letta Code uses a native turn or event ID when available. Current Letta Code Stop hooks have no turn ID, so that adapter uses a unique occurrence ID rather than silently dropping two identical turns. This fallback cannot deduplicate an external retry of the same hook process.
 
 Adapters send bounded turn data. They do not repeatedly send the full transcript after every turn.
+
+A `tool_result` event is a mid-turn boundary, and it carries route identity, the transcript path, the tool name, and whether the call reported an error. It does not carry the tool input or the tool output. Neither is read: the observation text comes from the transcript delta, which already contains the call and its result. Storing them would grow the state file on every tool call to hold what nothing looks at, and the broker rewrites that file on every mutation.
 
 ## Agent SDK boundary
 
@@ -335,13 +352,17 @@ Installation is idempotent. A hook whose command carries the `subconscious hook`
 
 Claude Code hooks provide the working directory, session ID, transcript path, and lifecycle events.
 
-The adapter observes `SessionStart`, `UserPromptSubmit`, and `Stop`, and delivers on `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse`.
+The adapter observes `SessionStart`, `UserPromptSubmit`, and `Stop`, and delivers on `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse`. With `observer.mid_turn` enabled it also observes `PostToolUse`.
 
 Observing the prompt is what puts the observer's turn beside the coding agent's rather than behind it. A prompt observation reports the `prompt` field from the hook input and nothing else. It does not read the transcript and does not advance the source cursor: at a prompt boundary that delta is the previous turn, which `Stop` already sent, and on the first prompt after a resume it is the whole transcript tail, because `SessionStart` sets no cursor. Leaving the cursor to `Stop` alone also keeps a turn's observation independent of which hook ran first. The prompt event ID carries the native event name and the prompt text, so a prompt never collides with the `Stop` of the same turn and two submissions never collapse into one.
 
 `SessionStart` and `UserPromptSubmit` read plain stdout. The tool events read only the JSON envelope. `PreCompact`, `Notification`, and `SessionEnd` discard hook output, so the adapter claims no channel for them.
 
 Delivering on the tool events lets a whisper reach a turn already in progress instead of waiting for the next prompt. It costs a local broker round trip per tool call and never calls Letta, so the observer's cadence still follows observation rather than tool use.
+
+`PostToolUse` is the mid-turn boundary. `PreToolUse` is deliberately not observed: nothing has happened when it fires, so its transcript delta is the one the previous `PostToolUse` already reported. A mid-turn observation advances the same cursor as `Stop`, and it has to, because the delta it consumed is exactly the delta `Stop` would otherwise resend. Its event ID carries the tool name and the tool input, so two calls in one turn stay distinct even when the hook runs before the transcript is flushed and the marker has not moved. Two identical calls that also share a marker still collide, and that is the safe direction: the second folds into nothing rather than earning an observer turn. One record can stand for several calls, so the observation names the most recent one and leaves the transcript delta below it as the full account.
+
+The hook skips a `PostToolUse` event when the project has not enabled `observer.mid_turn`. The broker refuses the event anyway, so this is not the check that enforces the flag; it keeps a project without the flag from paying a local round trip on every tool call to be told no.
 
 Claude Code has no proven external queue API. `queue_message` stays unavailable until a live test proves one.
 
@@ -353,7 +374,7 @@ The adapter must test passive hook context against Codex CLI 0.147.0 or later.
 
 Codex 0.147.0 ships a `hookSpecificOutput` schema for `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PreToolUse`, and `PostToolUse`. The adapter delivers on the prompt boundaries and both tool events. `SubagentStart` reaches the subagent rather than the route that caused the observation, so it stays unclaimed. `PermissionRequest`, `PreCompact`, `PostCompact`, and `SessionEnd` carry no context field. The installer registers `SessionStart`, `UserPromptSubmit`, `Stop`, and both tool events in `$CODEX_HOME/hooks.json`, with `.*` as the tool matcher.
 
-The adapter observes `SessionStart`, `UserPromptSubmit`, and `Stop`. A prompt observation follows the Claude Code rule above: it reports the prompt from the hook input and leaves the transcript cursor to `Stop`. Codex 0.147.0's `user-prompt-submit.command.input` schema requires a `prompt` string and a `turn_id`, and its `stop.command.input` schema requires the same `turn_id`, so the prompt event ID carries the native event name, the turn ID, and the prompt text. A build that omits the prompt produces an observation that says so rather than an empty one.
+The adapter observes `SessionStart`, `UserPromptSubmit`, and `Stop`, and with `observer.mid_turn` enabled it also observes `PostToolUse` under the Claude Code mid-turn rules above. A prompt observation follows the Claude Code rule above: it reports the prompt from the hook input and leaves the transcript cursor to `Stop`. Codex 0.147.0's `user-prompt-submit.command.input` schema requires a `prompt` string and a `turn_id`, and its `stop.command.input` schema requires the same `turn_id`, so the prompt event ID carries the native event name, the turn ID, and the prompt text. A build that omits the prompt produces an observation that says so rather than an empty one.
 
 The adapter must test `thread/inject_items`, `turn/steer`, and `turn/start` against an active app-server thread. It exposes only the operations that pass.
 
@@ -366,6 +387,8 @@ Letta Code reads context asymmetrically across the tool boundary. `PostToolUse` 
 Letta Code hooks provide the working directory and structured turn fields. Session and prompt hooks include conversation identity. Current Stop input does not, and the hook executor strips conversation environment variables. The initial adapter therefore observes `SessionStart` and `UserPromptSubmit`. It skips a Stop event with no conversation ID rather than routing it through an agent-wide fallback. Completed-turn observation depends on a Letta Code hook contract that supplies the conversation ID.
 
 The hook executor supports passive `additionalContext`. The adapter must still pass a real turn test.
+
+The adapter does not observe tool boundaries. Its completed-turn observation is still blocked on a hook contract that supplies the conversation ID, and it reads no transcript, so it has no delta a mid-turn observation could report. Mid-turn observation reaches Letta Code when completed-turn observation does.
 
 A Letta Code session is a Letta agent in a Letta conversation, so `queue_message` needs no harness queue API. The adapter reports the coding agent's agent and conversation IDs from hook input, and the broker writes the message into that conversation through the Agent SDK. Claude Code and Codex are foreign harnesses whose hooks cannot start a turn, so they keep `queue_message` disabled.
 
@@ -447,6 +470,13 @@ The CLI provides the following commands:
 - [x] An unbounded harness payload is clamped before it is stored, and the identity fields adapters read by name survive the clamp.
 - [x] A `processed` or `discarded` observation stores no payload.
 - [x] The drain loop selects the next observation without copying the whole state.
+- [x] Mid-turn observation stays off unless a project enables it, and the broker refuses a tool boundary from a project that has not.
+- [x] A burst of tool calls on one route costs at most two observer turns, and the resulting records account for every tool call the harness reported.
+- [x] A queued mid-turn record runs only after it clears both the tool-count and the quiet-period threshold.
+- [x] A completed turn discards the queued mid-turn record it supersedes, whether or not the project still enables the feature.
+- [x] A broker restart discards queued mid-turn records instead of running them against a turn that has already ended.
+- [x] No timer schedules a mid-turn observation. The readiness gate is re-read by the drain loop alone.
+- [x] A mid-turn threshold that is not a whole number in range fails configuration loading and names the key.
 
 ### Agent SDK
 
@@ -467,6 +497,7 @@ The CLI provides the following commands:
 - [x] A sandboxed project opens its session through the Cloud sandbox client and sends neither `cwd` nor session `env`.
 - [x] A sandboxed session keeps the MemFS read tools and the broker-process delivery tools.
 - [x] The observation prompt tells a sandboxed observer that the project root is not readable.
+- [x] The observation prompt tells a mid-turn observer that the coding agent is still working, and raises the delivery bar rather than lowering it.
 - [ ] A live turn proves that a sandboxed observer reads MemFS and delivers a whisper from the broker process.
 
 ### Delivery
@@ -504,6 +535,10 @@ The CLI provides the following commands:
 - [x] A prompt observation carries the prompt text from the hook input, stays bounded, and leaves the transcript cursor unchanged.
 - [x] A prompt event ID never matches the `Stop` event ID of the same turn, and two different prompts produce two IDs.
 - [x] A prompt hook that carries no prompt text produces a labelled observation rather than an error or an empty one.
+- [x] A `tool_result` event carries route and tool identity only, never the tool input or the tool output.
+- [x] Adapters observe `PostToolUse` and not `PreToolUse`, and a mid-turn observation advances the same transcript cursor as the completed turn.
+- [x] Two tool calls in one turn produce two event IDs even when the transcript marker has not moved.
+- [ ] A live session proves that a mid-turn whisper reaches the coding agent at a tool boundary inside the turn.
 
 ### Product validation
 

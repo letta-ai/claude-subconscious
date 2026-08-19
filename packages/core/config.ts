@@ -1,10 +1,32 @@
 import { access, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { dirname, join, parse as parsePath, resolve } from "node:path";
 import { parse } from "smol-toml";
-import type { ProjectConfig, ResolvedProjectConfig } from "./types.js";
+import type {
+  MidTurnObservationConfig,
+  ProjectConfig,
+  ResolvedProjectConfig,
+} from "./types.js";
 
 export const CONFIG_FILENAME = "subconscious.toml";
 export const DEFAULT_MODEL = "letta/auto";
+
+/**
+ * Defaults for mid-turn observation, used only when a project turns it on.
+ *
+ * Five tool calls is the point where a turn has done something the observer
+ * could not have predicted from the prompt. Below that the record is usually a
+ * read or two that the next `Stop` delta carries anyway, so running it early
+ * spends a Letta turn to say what the turn boundary would have said for free.
+ *
+ * Ninety seconds is the cadence bound. It holds a ten-minute turn to at most
+ * six extra observer turns, and it is longer than a typical observer turn, so
+ * the observer is never continuously busy on one route while the coding agent
+ * works. Both are floors: the gate needs the count and the quiet period.
+ */
+export const DEFAULT_MID_TURN: MidTurnObservationConfig = {
+  minToolCalls: 5,
+  minSeconds: 90,
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -33,6 +55,33 @@ function readOptionalString(
   return value.trim();
 }
 
+/**
+ * Read a whole-number setting.
+ *
+ * TOML distinguishes integers from floats, and smol-toml hands both back as
+ * numbers, so the float and the out-of-range value have to be rejected here or
+ * they reach the broker as a threshold that never passes. A rejected value
+ * fails the whole configuration rather than falling back to the default: a
+ * throttle silently reverting to something the file does not say is worse than
+ * a startup error naming the key.
+ */
+function readNumber(
+  source: Record<string, unknown>,
+  key: string,
+  fallback: number,
+  minimum: number,
+): number {
+  const value = source[key];
+  if (value === undefined) return fallback;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${key} must be a number.`);
+  }
+  if (!Number.isInteger(value) || value < minimum) {
+    throw new Error(`${key} must be a whole number of at least ${minimum}.`);
+  }
+  return value;
+}
+
 export function validateProjectConfig(raw: unknown): ProjectConfig {
   if (!isRecord(raw)) throw new Error("Configuration must be a TOML table.");
   if (raw.version !== 1) throw new Error("version must be 1.");
@@ -48,6 +97,24 @@ export function validateProjectConfig(raw: unknown): ProjectConfig {
   if (!isRecord(deliveryRaw)) throw new Error("delivery must be a TOML table.");
   if (!isRecord(observerRaw)) throw new Error("observer must be a TOML table.");
 
+  // The thresholds are validated whether or not the switch is on, so a typo in
+  // a file that has mid-turn observation turned off is still reported. Only the
+  // switch decides whether the settings reach the broker.
+  const midTurn: MidTurnObservationConfig = {
+    minToolCalls: readNumber(
+      observerRaw,
+      "mid_turn_min_tool_calls",
+      DEFAULT_MID_TURN.minToolCalls,
+      1,
+    ),
+    minSeconds: readNumber(
+      observerRaw,
+      "mid_turn_min_seconds",
+      DEFAULT_MID_TURN.minSeconds,
+      0,
+    ),
+  };
+
   return {
     version: 1,
     ...(agentId ? { agentId } : {}),
@@ -61,6 +128,7 @@ export function validateProjectConfig(raw: unknown): ProjectConfig {
         ? { instructions: readOptionalString(observerRaw, "instructions") }
         : {}),
       ...(readBoolean(observerRaw, "sandbox", false) ? { sandbox: true } : {}),
+      ...(readBoolean(observerRaw, "mid_turn", false) ? { midTurn } : {}),
     },
   };
 }
@@ -137,11 +205,22 @@ export function formatProjectConfig(config: ProjectConfig): string {
     `whispers = ${config.delivery.whispers}`,
     `queue_messages = ${config.delivery.queueMessages}`,
   ];
+  const midTurn = config.observer.midTurn;
   const observer = [
     ...(config.observer.instructions
       ? [`instructions = ${tomlString(config.observer.instructions)}`]
       : []),
     ...(config.observer.sandbox ? ["sandbox = true"] : []),
+    // The thresholds are written with the switch rather than only when they
+    // differ from the default, because they are the whole cost control and a
+    // project that turns mid-turn observation on should see what it costs.
+    ...(midTurn
+      ? [
+          "mid_turn = true",
+          `mid_turn_min_tool_calls = ${midTurn.minToolCalls}`,
+          `mid_turn_min_seconds = ${midTurn.minSeconds}`,
+        ]
+      : []),
   ];
   if (observer.length > 0) lines.push("", "[observer]", ...observer);
   return `${lines.join("\n")}\n`;

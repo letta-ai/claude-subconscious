@@ -82,6 +82,65 @@ function summarizeRecord(record: Record<string, unknown>): string | null {
   return `${role}:\n${parts.join("\n")}`;
 }
 
+/**
+ * Whether a finished tool call reported a failure.
+ *
+ * Claude Code has no single documented error field on `PostToolUse`: the tool
+ * response is whatever the tool returned. These are the shapes the built-in
+ * tools use, and anything unrecognized reads as success, because claiming an
+ * error the observer cannot see in the transcript is worse than saying nothing.
+ */
+function toolFailed(response: unknown): boolean {
+  if (!isRecord(response)) return false;
+  return (
+    response.is_error === true ||
+    response.isError === true ||
+    response.success === false ||
+    typeof response.error === "string"
+  );
+}
+
+/**
+ * The fields a mid-turn observation needs, and nothing else.
+ *
+ * A `PostToolUse` payload carries the whole tool input and the whole tool
+ * response, which have no upper bound, and the broker rewrites its state file
+ * on every mutation. `boundPayload` clamps whatever is stored, but clamping a
+ * megabyte of tool output down to the budget still stores the budget on every
+ * tool call, and none of it is read: `prepareObservation` reports the transcript
+ * delta, which already contains the call and its result. So the adapter sends
+ * the route identity, the transcript it reads from, and the two facts the
+ * observation text states directly.
+ */
+function midTurnPayload(
+  input: Record<string, unknown>,
+  sessionId: string,
+  workingDirectory: string,
+  transcriptPath: string | undefined,
+): Record<string, unknown> {
+  const toolName = stringValue(input.tool_name);
+  return {
+    session_id: sessionId,
+    cwd: workingDirectory,
+    ...(transcriptPath ? { transcript_path: transcriptPath } : {}),
+    ...(toolName ? { tool_name: toolName } : {}),
+    ...(toolFailed(input.tool_response) ? { tool_error: true } : {}),
+  };
+}
+
+/**
+ * The first line of a mid-turn observation.
+ *
+ * One record can stand for several tool calls, so it names the latest one
+ * rather than claiming to describe all of them. The transcript delta below it
+ * is the full account.
+ */
+function midTurnHeader(event: HarnessEvent): string {
+  const tool = stringValue(event.payload.tool_name);
+  const failed = event.payload.tool_error === true;
+  return `Claude Code is still working on this turn. Its most recent tool call was ${tool ?? "an unnamed tool"}${failed ? ", and it reported an error" : ""}.`;
+}
+
 function formatDelivery(delivery: DeliveryRecord): string {
   return `<subconscious_whisper delivery_id="${escapeXml(delivery.id)}">\n${escapeXml(delivery.text)}\n</subconscious_whisper>`;
 }
@@ -102,9 +161,14 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
         ? "session_start"
         : nativeEvent === "UserPromptSubmit"
           ? "user_prompt"
-          : nativeEvent === "Stop"
-            ? "turn_stop"
-            : null;
+          : // PostToolUse is the mid-turn boundary. PreToolUse is deliberately
+            // absent: nothing has happened yet when it fires, so its transcript
+            // delta is the one the previous PostToolUse already reported.
+            nativeEvent === "PostToolUse"
+            ? "tool_result"
+            : nativeEvent === "Stop"
+              ? "turn_stop"
+              : null;
     if (!type) return null;
     const sessionId = stringValue(input.session_id);
     const workingDirectory =
@@ -127,6 +191,14 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
         // is what actually distinguishes two submissions. Every other event
         // leaves it undefined, which is one constant more in the hash.
         input.prompt,
+        // Two tool calls inside one turn share the session, the directory, and
+        // sometimes the marker, because the hook can run before the transcript
+        // is flushed. The call itself is what separates them. Two identical
+        // calls that also share a marker still collide, and that is the safe
+        // direction: the second is treated as a repeat of the first, so it
+        // folds into nothing rather than earning a second observer turn.
+        input.tool_name,
+        input.tool_input,
         ...(transcriptPath ? [] : [input]),
       ]),
       harness: this.id,
@@ -134,7 +206,10 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       sessionId,
       workingDirectory,
       occurredAt: new Date().toISOString(),
-      payload: { ...input },
+      payload:
+        type === "tool_result"
+          ? midTurnPayload(input, sessionId, workingDirectory, transcriptPath)
+          : { ...input },
     };
   }
 
@@ -167,12 +242,22 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
           : "Claude Code user prompt submitted with no prompt text on the hook input.",
       };
     }
-    // Everything below is the turn_stop path. The two other observed types
-    // return above, so the wording here cannot land on a prompt observation.
+    // Everything below reads the transcript delta, which is what turn_stop and
+    // tool_result share. The two prompt-side types return above, so the wording
+    // here cannot land on a prompt observation.
+    //
+    // A mid-turn observation advances the same cursor as turn_stop, and it has
+    // to: the delta it consumed is exactly the delta the following turn_stop
+    // would otherwise resend. That is also why the broker keeps only one queued
+    // mid-turn record per route. Whichever observation runs first takes the
+    // whole delta, and a second one behind it would report an empty turn.
+    const midTurn = event.type === "tool_result";
     const transcriptPath = stringValue(event.payload.transcript_path);
     if (!transcriptPath) {
       return {
-        text: `Claude Code turn stopped.\n${truncateText(JSON.stringify(event.payload), 8_000)}`,
+        text: midTurn
+          ? `${midTurnHeader(event)} The hook input carried no transcript path, so there is nothing further to report.`
+          : `Claude Code turn stopped.\n${truncateText(JSON.stringify(event.payload), 8_000)}`,
       };
     }
     const delta = await readJsonlDelta(transcriptPath, cursor);
@@ -184,8 +269,12 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       delta.skippedBytes > 0
         ? `[Skipped ${delta.skippedBytes} earlier transcript bytes.]\n\n`
         : "";
+    const empty = midTurn
+      ? "Nothing new has been written to the transcript since your last observation."
+      : "Claude Code completed a turn with no new text records.";
+    const header = midTurn ? `${midTurnHeader(event)}\n\n` : "";
     return {
-      text: `${skipped}${transcript || "Claude Code completed a turn with no new text records."}`,
+      text: `${header}${skipped}${transcript || empty}`,
       nextCursor: delta.nextCursor,
     };
   }
