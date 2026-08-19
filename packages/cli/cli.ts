@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rm } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import {
   brokerLockPath,
+  buildFingerprint,
   createBrokerDescriptor,
   descriptorPath,
   findProjectConfig,
@@ -86,7 +87,10 @@ async function serve(): Promise<void> {
   const old = await readBrokerDescriptor(descriptorPath());
   if (old && !processExists(old.pid))
     await removeBrokerFiles(old, descriptorPath());
-  const descriptor = createBrokerDescriptor();
+  const descriptor = {
+    ...createBrokerDescriptor(),
+    build: await buildFingerprint(process.argv[1] as string),
+  };
   let resolveShutdown!: () => void;
   const shutdown = new Promise<void>((resolve) => {
     resolveShutdown = resolve;
@@ -142,6 +146,11 @@ async function start(): Promise<void> {
     }
   }
   throw new Error("The Subconscious broker did not start within 3 seconds.");
+}
+
+async function restart(): Promise<void> {
+  await stop();
+  await start();
 }
 
 async function stop(): Promise<void> {
@@ -283,7 +292,7 @@ function adapters(): void {
 function usage(): void {
   console.log(`Usage:
   subconscious init [path] [--agent <id>] [--model <handle>]
-  subconscious start|stop|adapters
+  subconscious start|stop|restart|adapters
   subconscious status [path] [--detail | --json]
   subconscious reconcile <event-id> (--retry | --discard)
   subconscious install <claude-code|codex|letta-code> [path]
@@ -296,6 +305,7 @@ async function main(): Promise<void> {
   if (command === "serve") return await serve();
   if (command === "start") return await start();
   if (command === "stop") return await stop();
+  if (command === "restart") return await restart();
   if (command === "status") return await status(args);
   if (command === "reconcile") return await reconcile(args);
   if (command === "adapters") return adapters();

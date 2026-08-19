@@ -39,6 +39,10 @@ The broker stores state outside the project checkout. The state key includes the
 
 Adapters connect through a Unix domain socket on macOS and Linux. Windows adapters use a named pipe. The broker does not open a TCP port.
 
+The broker outlives the code that started it. Its descriptor therefore records which build is serving, and an adapter that finds a live broker from another build stops it and starts its own. A liveness check alone would reuse a daemon that answers every request with older behavior, which reads as the new code silently doing nothing.
+
+The fingerprint is the entry point's path and modification time. It catches a different install location, an upgrade, and a rebuild. It does not catch editing a source file the entry point does not import directly, so `subconscious restart` remains the explicit control.
+
 ## Package boundaries
 
 The rewrite uses the following packages:
@@ -50,7 +54,7 @@ packages/
   adapter-claude-code/  Claude Code hooks and plugin package
   adapter-codex/        Codex hooks and app-server integration
   adapter-letta-code/   Letta Code hooks and mod integration
-  cli/                  init, start, stop, status, and adapter diagnostics
+  cli/                  init, start, stop, restart, status, and adapter diagnostics
 ```
 
 The current Claude-specific scripts are migration references. New packages do not import them.

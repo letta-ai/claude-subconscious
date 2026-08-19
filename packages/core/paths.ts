@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { stat } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -8,6 +9,32 @@ export interface BrokerDescriptor {
   token: string;
   pid: number;
   startedAt: string;
+  /**
+   * Which build is serving. Absent on a descriptor written before this field
+   * existed, which reads as stale.
+   */
+  build?: string;
+}
+
+/**
+ * Identify the build behind a broker so a stale daemon can be replaced.
+ *
+ * The broker outlives the code that started it. Repointing the plugin, or
+ * rebuilding while a daemon runs, leaves a process answering every request with
+ * last week's behavior, and a liveness ping cannot tell the difference.
+ *
+ * Path plus modification time catches the cases that matter: a different
+ * install location, an upgrade, and a rebuild. It does not catch editing a
+ * source file that the entry point does not import directly, so `restart`
+ * stays the explicit escape hatch during development.
+ */
+export async function buildFingerprint(entryPath: string): Promise<string> {
+  try {
+    const info = await stat(entryPath);
+    return `${entryPath}@${info.mtimeMs}`;
+  } catch {
+    return entryPath;
+  }
 }
 
 export function stateDirectory(env: NodeJS.ProcessEnv = process.env): string {

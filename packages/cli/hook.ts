@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  buildFingerprint,
   descriptorPath,
   findProjectConfig,
   readBrokerDescriptor,
@@ -95,13 +96,24 @@ async function ping(descriptor: BrokerDescriptor): Promise<boolean> {
 
 async function ensureBroker(): Promise<BrokerDescriptor> {
   const path = descriptorPath();
-  const existing = await readBrokerDescriptor(path);
-  if (existing && (await ping(existing))) return existing;
-  if (existing && !processExists(existing.pid))
-    await removeBrokerFiles(existing, path);
-
   const hookPath = fileURLToPath(import.meta.url);
   const cliPath = join(dirname(hookPath), `cli${extname(hookPath)}`);
+  const build = await buildFingerprint(cliPath);
+
+  const existing = await readBrokerDescriptor(path);
+  if (existing && existing.build === build && (await ping(existing)))
+    return existing;
+  if (existing && existing.build !== build && (await ping(existing))) {
+    // A live broker from another build answers every request with its own
+    // behavior, so reusing it silently runs code this hook did not come from.
+    await sendBrokerRequest(existing, { type: "shutdown" }).catch(() => {});
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline && (await ping(existing))) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  if (existing && !processExists(existing.pid))
+    await removeBrokerFiles(existing, path);
   const child = spawn(
     process.execPath,
     [...process.execArgv, cliPath, "serve"],

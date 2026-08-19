@@ -1,8 +1,9 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  buildFingerprint,
   createEmptyState,
   createRouteRecord,
   routeKey,
@@ -86,5 +87,47 @@ describe("durable state", () => {
     expect(routeKey(base)).not.toBe(routeKey({ ...base, sessionId: "two" }));
     expect(createRouteRecord(base).conversationId).toBeNull();
     expect(createEmptyState().version).toBe(1);
+  });
+});
+
+describe("build fingerprint", () => {
+  it("changes when the entry point is rebuilt", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "subconscious-build-"));
+    try {
+      const entry = join(directory, "cli.js");
+      await writeFile(entry, "// first");
+      const first = await buildFingerprint(entry);
+
+      await writeFile(entry, "// second");
+      await utimes(entry, new Date(), new Date(Date.now() + 1_000));
+      const second = await buildFingerprint(entry);
+
+      expect(first).not.toBe(second);
+      expect(first).toContain(entry);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("distinguishes two installs of the same file name", async () => {
+    const left = await mkdtemp(join(tmpdir(), "subconscious-left-"));
+    const right = await mkdtemp(join(tmpdir(), "subconscious-right-"));
+    try {
+      const leftEntry = join(left, "cli.js");
+      const rightEntry = join(right, "cli.js");
+      await writeFile(leftEntry, "// same bytes");
+      await writeFile(rightEntry, "// same bytes");
+      // Repointing the plugin at another checkout is the case that started this.
+      expect(await buildFingerprint(leftEntry)).not.toBe(
+        await buildFingerprint(rightEntry),
+      );
+    } finally {
+      await rm(left, { recursive: true, force: true });
+      await rm(right, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the path when the entry point is missing", async () => {
+    expect(await buildFingerprint("/nope/cli.js")).toBe("/nope/cli.js");
   });
 });
