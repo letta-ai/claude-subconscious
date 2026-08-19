@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import {
+  defaultContextChannel,
   escapeXml,
   eventId,
   formatSessionStatus,
   truncateText,
+  type ContextChannel,
   type DeliveryRecord,
   type HarnessAdapter,
   type HarnessEvent,
@@ -112,6 +114,12 @@ export class LettaCodeAdapter implements HarnessAdapter {
 
   formatStatus(status: SessionStatus): string {
     return formatSessionStatus(status);
+  }
+
+  contextChannel(nativeEvent: string): ContextChannel | null {
+    // Letta Code's tool-level hooks are untested from here, so it claims only
+    // the baseline. Widen this once a live run proves more.
+    return defaultContextChannel(nativeEvent);
   }
 }
 

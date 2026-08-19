@@ -9,6 +9,7 @@ import {
   removeBrokerFiles,
   sendBrokerRequest,
   type BrokerDescriptor,
+  type ContextChannel,
   type DeliveryTarget,
   type HarnessId,
 } from "../core/index.js";
@@ -126,6 +127,41 @@ async function writeStdout(text: string): Promise<void> {
   if (!process.stdout.write(`${text}\n`)) await once(process.stdout, "drain");
 }
 
+/**
+ * Render context on the channel the harness accepts, or null when there is
+ * nothing to say.
+ *
+ * A wrong shape fails silently: the harness drops the output and no context
+ * reaches the model, so this stays a pure function that tests can pin. Which
+ * events accept which channel is the adapter's to decide.
+ */
+export function formatHookOutput(
+  event: string,
+  text: string,
+  channel: ContextChannel,
+): string | null {
+  if (!text) return null;
+  if (channel === "stdout") return text;
+  return JSON.stringify({
+    hookSpecificOutput: { hookEventName: event, additionalContext: text },
+  });
+}
+
+/**
+ * Put text in the model's context.
+ *
+ * The envelope carries one object per event, so every part of a delivery has
+ * to be emitted together rather than written out as it is collected.
+ */
+async function emitContext(
+  event: string,
+  text: string,
+  channel: ContextChannel,
+): Promise<void> {
+  const output = formatHookOutput(event, text, channel);
+  if (output) await writeStdout(output);
+}
+
 export async function runHook(harness: HarnessId): Promise<void> {
   const adapter = getAdapter(harness);
   const raw = await readStdin();
@@ -137,9 +173,11 @@ export async function runHook(harness: HarnessId): Promise<void> {
   const descriptor = await ensureBroker();
   const event = nativeEvent(input);
 
-  if (event === "SessionStart" || event === "UserPromptSubmit") {
+  const channel = event ? adapter.contextChannel(event) : null;
+  if (event && channel) {
     // The route is created by SessionStart's observe, which runs below, so the
-    // status lands on the first user prompt rather than at session start.
+    // status lands on the first event after it rather than at session start.
+    const parts: string[] = [];
     const statusResponse = await sendBrokerRequest(descriptor, {
       type: "claim_session_status",
       target,
@@ -149,7 +187,7 @@ export async function runHook(harness: HarnessId): Promise<void> {
       statusResponse.type === "session_status" &&
       statusResponse.status
     ) {
-      await writeStdout(adapter.formatStatus(statusResponse.status));
+      parts.push(adapter.formatStatus(statusResponse.status));
     }
 
     const response = await sendBrokerRequest(descriptor, {
@@ -157,16 +195,20 @@ export async function runHook(harness: HarnessId): Promise<void> {
       target,
       kind: "whisper",
     });
-    if (
-      response.ok &&
-      response.type === "leased" &&
-      response.deliveries.length > 0
-    ) {
-      await writeStdout(adapter.formatWhispers(response.deliveries));
-      await sendBrokerRequest(descriptor, {
-        type: "ack",
-        deliveryIds: response.deliveries.map((delivery) => delivery.id),
-      });
+    const deliveries =
+      response.ok && response.type === "leased" ? response.deliveries : [];
+    if (deliveries.length > 0) parts.push(adapter.formatWhispers(deliveries));
+
+    if (parts.length > 0) {
+      await emitContext(event, parts.join("\n\n"), channel);
+      // Acknowledge only after the context is out, so a crash mid-emit
+      // redelivers rather than silently dropping the whisper.
+      if (deliveries.length > 0) {
+        await sendBrokerRequest(descriptor, {
+          type: "ack",
+          deliveryIds: deliveries.map((delivery) => delivery.id),
+        });
+      }
     }
   }
 

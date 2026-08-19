@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { enrichHookInput } from "../packages/cli/hook.js";
+import { claudeCodeAdapter } from "../packages/adapter-claude-code/index.js";
+import { codexAdapter } from "../packages/adapter-codex/index.js";
+import { lettaCodeAdapter } from "../packages/adapter-letta-code/index.js";
+import { enrichHookInput, formatHookOutput } from "../packages/cli/hook.js";
 
 describe("hook context", () => {
   it("fills Letta Code Stop identity from the hook process environment", () => {
@@ -52,5 +55,58 @@ describe("hook context", () => {
         { CONVERSATION_ID: "ambient-conversation" },
       ),
     ).not.toHaveProperty("conversation_id");
+  });
+});
+
+describe("hook context output", () => {
+  it("writes plain text on the stdout channel", () => {
+    expect(formatHookOutput("SessionStart", "context", "stdout")).toBe(
+      "context",
+    );
+    expect(formatHookOutput("UserPromptSubmit", "context", "stdout")).toBe(
+      "context",
+    );
+  });
+
+  it("names the event in the envelope the tool hooks require", () => {
+    for (const event of ["PreToolUse", "PostToolUse"]) {
+      const output = formatHookOutput(event, "context", "envelope");
+      expect(output).not.toBeNull();
+      expect(JSON.parse(output!)).toEqual({
+        hookSpecificOutput: {
+          hookEventName: event,
+          additionalContext: "context",
+        },
+      });
+    }
+  });
+
+  it("says nothing when there is no context", () => {
+    expect(formatHookOutput("PreToolUse", "", "envelope")).toBeNull();
+    expect(formatHookOutput("UserPromptSubmit", "", "stdout")).toBeNull();
+  });
+});
+
+describe("adapter context channels", () => {
+  it("gives Claude Code the tool boundaries on the envelope channel", () => {
+    expect(claudeCodeAdapter.contextChannel("SessionStart")).toBe("stdout");
+    expect(claudeCodeAdapter.contextChannel("UserPromptSubmit")).toBe("stdout");
+    expect(claudeCodeAdapter.contextChannel("PreToolUse")).toBe("envelope");
+    expect(claudeCodeAdapter.contextChannel("PostToolUse")).toBe("envelope");
+  });
+
+  it("refuses the events whose output the harness discards", () => {
+    for (const event of ["PreCompact", "Notification", "SessionEnd", "Stop"]) {
+      expect(claudeCodeAdapter.contextChannel(event)).toBeNull();
+    }
+  });
+
+  it("holds the other harnesses to the proven baseline", () => {
+    for (const adapter of [codexAdapter, lettaCodeAdapter]) {
+      expect(adapter.contextChannel("SessionStart")).toBe("stdout");
+      expect(adapter.contextChannel("UserPromptSubmit")).toBe("stdout");
+      expect(adapter.contextChannel("PreToolUse")).toBeNull();
+      expect(adapter.contextChannel("PostToolUse")).toBeNull();
+    }
   });
 });

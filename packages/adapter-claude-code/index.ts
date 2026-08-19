@@ -5,6 +5,7 @@ import {
   formatSessionStatus,
   readJsonlDelta,
   truncateText,
+  type ContextChannel,
   type DeliveryRecord,
   type HarnessAdapter,
   type HarnessEvent,
@@ -164,6 +165,19 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
 
   formatStatus(status: SessionStatus): string {
     return formatSessionStatus(status);
+  }
+
+  contextChannel(nativeEvent: string): ContextChannel | null {
+    // Per the Claude Code hook reference: these two read plain stdout, the
+    // tool events read only hookSpecificOutput.additionalContext, and
+    // PreCompact, Notification, and SessionEnd have their output discarded.
+    if (nativeEvent === "SessionStart" || nativeEvent === "UserPromptSubmit") {
+      return "stdout";
+    }
+    if (nativeEvent === "PreToolUse" || nativeEvent === "PostToolUse") {
+      return "envelope";
+    }
+    return null;
   }
 }
 

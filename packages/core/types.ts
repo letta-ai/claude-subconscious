@@ -50,6 +50,15 @@ export interface AdapterCapabilities {
   transcript: "events" | "file" | "api" | "none";
 }
 
+/**
+ * How a harness reads context out of a hook.
+ *
+ * "stdout" takes the text as written. "envelope" requires a JSON object naming
+ * the event. Sending the wrong one is silent: the harness drops the output and
+ * no context reaches the model.
+ */
+export type ContextChannel = "stdout" | "envelope";
+
 export interface SourceCursor {
   offset?: number;
   sequence?: number;
@@ -168,4 +177,10 @@ export interface HarnessAdapter {
   ): Promise<PreparedObservation>;
   formatWhispers(deliveries: DeliveryRecord[]): string;
   formatStatus(status: SessionStatus): string;
+  /**
+   * The channel this harness accepts context on for a native hook event, or
+   * null when the event cannot carry any. An adapter claims an event only once
+   * a live run against the current harness version proves it.
+   */
+  contextChannel(nativeEvent: string): ContextChannel | null;
 }

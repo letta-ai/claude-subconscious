@@ -256,13 +256,24 @@ interface AdapterDeliveryResult {
 interface HarnessAdapter {
   id: string;
   capabilities: HarnessAdapterCapabilities;
-  normalize(input: unknown): Promise<HarnessEvent[]>;
-  deliverWhisper(delivery: PendingWhisper): Promise<AdapterDeliveryResult>;
-  queueMessage?(delivery: PendingMessage): Promise<AdapterDeliveryResult>;
+  normalizeHookInput(input: unknown): Promise<HarnessEvent | null>;
+  prepareObservation(
+    event: HarnessEvent,
+    cursor: SourceCursor | undefined,
+  ): Promise<PreparedObservation>;
+  formatWhispers(deliveries: DeliveryRecord[]): string;
+  formatStatus(status: SessionStatus): string;
+  contextChannel(nativeEvent: string): ContextChannel | null;
 }
 ```
 
-An adapter does not claim a capability until a live test proves the current harness version.
+## Context channels
+
+A harness reads context out of a hook on one of two channels. `stdout` takes the text as written. `envelope` requires a JSON object naming the event. An event that carries no context at all returns null.
+
+Sending the wrong channel fails silently. The harness drops the output, no context reaches the model, and the hook still exits zero. Nothing in the delivery path can see the difference.
+
+That silence is what makes the acknowledgement order matter: the broker marks a delivery delivered after the hook emits it, so an ignored emit spends the whisper permanently. An adapter therefore claims an event only when it can say which channel that event reads, and widening the claim is a live-test change rather than a guess.
 
 ## Initial adapters
 
@@ -270,9 +281,11 @@ An adapter does not claim a capability until a live test proves the current harn
 
 Claude Code hooks provide the working directory, session ID, transcript path, and lifecycle events.
 
-The adapter uses `SessionStart`, `UserPromptSubmit`, and `Stop`. It does not poll Letta before every tool call.
+The adapter observes `SessionStart` and `Stop`, and delivers on `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse`.
 
-Passive context uses the first live-proven hook output supported by the installed Claude Code version. `UserPromptSubmit` is the preferred boundary, so a whisper appears at the start of the next user turn.
+`SessionStart` and `UserPromptSubmit` read plain stdout. The tool events read only the JSON envelope. `PreCompact`, `Notification`, and `SessionEnd` discard hook output, so the adapter claims no channel for them.
+
+Delivering on the tool events lets a whisper reach a turn already in progress instead of waiting for the next prompt. It costs a local broker round trip per tool call and never calls Letta, so the observer's cadence still follows observation rather than tool use.
 
 Claude Code has no proven external queue API. `queue_message` stays unavailable until a live test proves one.
 
@@ -374,7 +387,8 @@ The CLI provides the following commands:
 ### Adapters
 
 - [x] The Claude Code adapter proves project discovery, incremental observation, and passive whisper delivery in the real CLI.
-- [x] The Claude Code adapter does not poll Letta before each tool call.
+- [x] The Claude Code adapter does not call Letta before each tool call. Tool-boundary delivery reaches the local broker only.
+- [x] Each adapter names the context channel for every event it claims, and claims none it cannot name.
 - [x] The Codex adapter proves project discovery and incremental observation in the real CLI.
 - [x] The Codex adapter exposes only live-tested passive and queue capabilities.
 - [x] The Letta Code adapter proves passive delivery through a real turn before release.
