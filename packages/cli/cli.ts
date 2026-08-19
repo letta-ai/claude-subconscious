@@ -153,6 +153,24 @@ async function restart(): Promise<void> {
   await start();
 }
 
+/**
+ * Wait for a broker process to leave, not for its socket to go quiet.
+ *
+ * A shutting-down broker closes its listener first and then waits for whatever
+ * it already started, so it stops answering long before it exits. It still
+ * holds the start-up lock for all of that time. Reading the closed socket as
+ * "stopped" is what made `restart` report success and then fail to start,
+ * leaving the session with no broker at all.
+ */
+async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processExists(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return !processExists(pid);
+}
+
 async function stop(): Promise<void> {
   const descriptor = await readBrokerDescriptor(descriptorPath());
   if (!descriptor || !(await ping(descriptor))) {
@@ -160,13 +178,13 @@ async function stop(): Promise<void> {
     return;
   }
   await sendBrokerRequest(descriptor, { type: "shutdown" });
-  const deadline = Date.now() + 3_000;
-  while (Date.now() < deadline && (await ping(descriptor))) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  if (await ping(descriptor)) {
+  if (!(await waitForExit(descriptor.pid, 30_000))) {
+    // The broker only reaches this point with work in flight, because it does
+    // not cut a delivery or an observer turn in half. Naming the process is
+    // what lets the caller wait for it or end it, rather than being told the
+    // broker stopped and then that one is already running.
     throw new Error(
-      `The Subconscious broker did not stop within 3 seconds (PID ${descriptor.pid}).`,
+      `The Subconscious broker is still finishing work and has not exited (PID ${descriptor.pid}).`,
     );
   }
   console.log("Subconscious broker stopped.");

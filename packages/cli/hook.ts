@@ -94,10 +94,33 @@ async function ping(descriptor: BrokerDescriptor): Promise<boolean> {
   }
 }
 
+/**
+ * Where this hook's broker entry point lives.
+ *
+ * The hook and the broker ship in one directory, so the entry point is the
+ * hook's own sibling. Locating it here keeps the spawn path and the identity
+ * check reading the same file.
+ */
+function brokerEntryPath(): string {
+  const hookPath = fileURLToPath(import.meta.url);
+  return join(dirname(hookPath), `cli${extname(hookPath)}`);
+}
+
+/**
+ * The build identity a hook requires of the broker it talks to.
+ *
+ * Exported so an end-to-end test can stand up a broker this hook will accept.
+ * Recomputing the rule in the test instead would let the two drift apart, and
+ * the failure is silent in the wrong direction: the hook would quietly replace
+ * the test's broker with a spawned daemon and the test would still pass.
+ */
+export async function brokerBuild(): Promise<string> {
+  return await buildFingerprint(brokerEntryPath());
+}
+
 async function ensureBroker(): Promise<BrokerDescriptor> {
   const path = descriptorPath();
-  const hookPath = fileURLToPath(import.meta.url);
-  const cliPath = join(dirname(hookPath), `cli${extname(hookPath)}`);
+  const cliPath = brokerEntryPath();
   const build = await buildFingerprint(cliPath);
 
   const existing = await readBrokerDescriptor(path);
@@ -106,9 +129,14 @@ async function ensureBroker(): Promise<BrokerDescriptor> {
   if (existing && existing.build !== build && (await ping(existing))) {
     // A live broker from another build answers every request with its own
     // behavior, so reusing it silently runs code this hook did not come from.
+    //
+    // The wait is for the process to leave, not for its socket to go quiet. A
+    // shutting-down broker closes its listener first and finishes what it
+    // started, holding the start-up lock the whole time, so spawning as soon as
+    // the ping fails produces a replacement that cannot start.
     await sendBrokerRequest(existing, { type: "shutdown" }).catch(() => {});
     const deadline = Date.now() + 3_000;
-    while (Date.now() < deadline && (await ping(existing))) {
+    while (Date.now() < deadline && processExists(existing.pid)) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }

@@ -960,6 +960,97 @@ describe("mid-turn observation", () => {
   });
 });
 
+describe("broker shutdown", () => {
+  it("outlives its own socket while a turn is still in flight", async () => {
+    // A shutting-down broker closes its listener first and then waits for the
+    // work it already started, because cutting an observer turn in half would
+    // leave a whisper that may or may not have been sent. So the socket goes
+    // quiet long before the process does, and anything that reads a failed ping
+    // as "stopped" will start a replacement while this one still holds the
+    // start-up lock. `subconscious stop` therefore waits for the process.
+    const directory = await root();
+    await writeProjectConfig(directory, {
+      version: 1,
+      agentId: "agent-test",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages: false },
+      observer: {},
+    });
+    const descriptor: BrokerDescriptor = {
+      version: 1,
+      endpoint:
+        process.platform === "win32"
+          ? `\\\\.\\pipe\\subconscious-test-${randomUUID()}`
+          : join(directory, "shutdown.sock"),
+      token: "test-token",
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    };
+    let release!: () => void;
+    const inFlight = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = false;
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime: {
+        run: async (): Promise<RunObservationResult> => {
+          started = true;
+          await inFlight;
+          return {
+            status: "success",
+            conversationId: "conv-observer",
+            result: {
+              type: "result",
+              success: true,
+              durationMs: 1,
+              conversationId: "conv-observer",
+              runIds: ["run-observer"],
+            },
+          };
+        },
+      },
+    });
+    await broker.start();
+    await sendBrokerRequest(descriptor, {
+      type: "observe",
+      event: {
+        id: "shutdown-event",
+        harness: "claude-code",
+        type: "session_start",
+        sessionId: "shutdown-session",
+        workingDirectory: directory,
+        occurredAt: new Date().toISOString(),
+        payload: {},
+      },
+    });
+    await waitFor(async () => started);
+
+    let closed = false;
+    const closing = broker.close().then(() => {
+      closed = true;
+    });
+    await waitFor(async () => {
+      // The listener is gone as soon as close() begins.
+      const reachable = await sendBrokerRequest(descriptor, { type: "ping" })
+        .then(() => true)
+        .catch(() => false);
+      return !reachable;
+    });
+    expect(closed).toBe(false);
+
+    release();
+    await closing;
+    expect(closed).toBe(true);
+    const state = JSON.parse(
+      await readFile(join(directory, "state.json"), "utf8"),
+    ) as { observations: Record<string, { status: string }> };
+    // The turn finished rather than being abandoned mid-flight.
+    expect(state.observations["shutdown-event"]?.status).toBe("processed");
+  });
+});
+
 describe("session status claim", () => {
   it("hands the session identity to the first caller only", async () => {
     const directory = await root();

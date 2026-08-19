@@ -41,6 +41,8 @@ Adapters connect through a Unix domain socket on macOS and Linux. Windows adapte
 
 The broker outlives the code that started it. Its descriptor therefore records which build is serving, and an adapter that finds a live broker from another build stops it and starts its own. A liveness check alone would reuse a daemon that answers every request with older behavior, which reads as the new code silently doing nothing.
 
+A shutting-down broker closes its listener before it waits for the work it already started, because it does not cut a delivery or an observer turn in half. It therefore stops answering long before it exits, while still holding the start-up lock. `subconscious stop` waits for the process to leave rather than for the socket to go quiet, and an adapter replacing a stale broker waits the same way. Reading a failed ping as a stopped broker reports success and then fails to start, which leaves the session with no broker at all.
+
 The fingerprint is the entry point's path and modification time. It catches a different install location, an upgrade, and a rebuild. It does not catch editing a source file the entry point does not import directly, so `subconscious restart` remains the explicit control.
 
 Observation inside a turn coalesces instead of queueing. An adapter's `prepareObservation` reads the route's transcript delta when the observer turn runs, not when the event arrives, so two queued mid-turn observations on one route are redundant by construction: the first consumes the whole delta and the second reports an empty one. The broker therefore keeps at most one queued mid-turn record per route and folds every later tool result into it. A record that has already started running is not a fold target, which bounds a route to two mid-turn records at once, one running and one collecting.
@@ -518,6 +520,13 @@ The CLI provides the following commands:
 - [ ] A live turn proves that a queued message reaches a running Letta Code conversation.
 - [x] The session status reaches the harness once per route and reports the agent, model, and delivery channels.
 - [x] A second status claim on the same route returns nothing.
+- [x] A whisper reaches Claude Code through the real hook, on the channel each boundary reads, in end-to-end tests that assert on the emitted bytes.
+- [x] The envelope names the boundary that carried it, on both tool events.
+- [x] A status and a whisper that land on the same boundary are emitted as one object.
+- [x] A whisper an event cannot carry stays pending for a boundary that can.
+- [x] A hook that fails while writing leaves the whisper pending and delivers it at the next boundary.
+- [x] A whisper reaches only the session that earned it, and no whisper leaves a directory no project configures.
+- [x] A shutting-down broker finishes an observer turn already in flight, and its socket closes first, so stopping waits for the process rather than for the ping.
 
 ### Adapters
 
