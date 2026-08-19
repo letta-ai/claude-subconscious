@@ -106,7 +106,7 @@ interface Session {
  * down, and spawns a real one, which would leave the test passing against a
  * process it never meant to start.
  */
-async function session(whisper: string): Promise<Session> {
+async function session(whisper: string, build?: string): Promise<Session> {
   const directory = await root("whisper");
   const home = await root("home");
   const sessionId = "session-whisper";
@@ -172,7 +172,7 @@ async function session(whisper: string): Promise<Session> {
     token: "test-token",
     pid: process.pid,
     startedAt: now,
-    build: await brokerBuild(),
+    build: build ?? (await brokerBuild()),
   };
   const broker = new SubconsciousBroker({
     descriptor,
@@ -392,6 +392,35 @@ describe("a whisper waiting in the broker", () => {
         (delivery) => delivery.status === "pending",
       ),
     ).toBe(true);
+  });
+
+  it("gives up rather than making the harness wait for a broker", async () => {
+    // A broker from another build cannot be used, and replacing one can take
+    // longer than the harness allows the hook to live: Claude Code drops a
+    // tool-boundary hook after three seconds. Waiting there does not buy a late
+    // whisper, it loses the boundary and the observation with it. So the hook
+    // asks the old broker to stop, emits nothing, and lets the next boundary
+    // use the replacement. The whisper is still pending for it.
+    const active = await session(
+      "Not worth a stalled session.",
+      "another-build",
+    );
+    await active.takeStatus();
+
+    const started = Date.now();
+    const output = await active.hook({
+      hook_event_name: "UserPromptSubmit",
+      prompt: "Go.",
+    });
+    const elapsed = Date.now() - started;
+
+    expect(output).toBe("");
+    expect(
+      (await active.deliveries()).map((delivery) => delivery.status),
+    ).toEqual(["pending"]);
+    // Well inside the tightest hook budget. The bound is loose on purpose: the
+    // failure this catches is seconds long, not milliseconds.
+    expect(elapsed).toBeLessThan(1_000);
   });
 
   it("reaches only the session that earned it", async () => {

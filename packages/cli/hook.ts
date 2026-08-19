@@ -118,7 +118,27 @@ export async function brokerBuild(): Promise<string> {
   return await buildFingerprint(brokerEntryPath());
 }
 
-async function ensureBroker(): Promise<BrokerDescriptor> {
+/**
+ * How long a hook may spend getting hold of a usable broker.
+ *
+ * The harness is waiting on this process. Claude Code allows a tool-boundary
+ * hook three seconds and drops it after that, so anything approaching that
+ * budget does not buy a late whisper, it loses the whole boundary and the
+ * observation with it. A ready broker answers in well under a tenth of that.
+ * When one is not ready, giving up now and letting the next boundary use the
+ * broker this call started costs one missed whisper, which is what whispers
+ * are: passive context that the next boundary can carry just as well.
+ */
+const BROKER_READY_BUDGET_MS = 250;
+
+/**
+ * The broker this hook should talk to, or null to do nothing this time.
+ *
+ * Starting or replacing a broker is never waited out on the harness's clock.
+ * The work is kicked off and this returns, because a broker that is not ready
+ * yet is a reason to skip one boundary, not a reason to stall the session.
+ */
+async function ensureBroker(): Promise<BrokerDescriptor | null> {
   const path = descriptorPath();
   const cliPath = brokerEntryPath();
   const build = await buildFingerprint(cliPath);
@@ -126,20 +146,16 @@ async function ensureBroker(): Promise<BrokerDescriptor> {
   const existing = await readBrokerDescriptor(path);
   if (existing && existing.build === build && (await ping(existing)))
     return existing;
+
   if (existing && existing.build !== build && (await ping(existing))) {
     // A live broker from another build answers every request with its own
     // behavior, so reusing it silently runs code this hook did not come from.
-    //
-    // The wait is for the process to leave, not for its socket to go quiet. A
-    // shutting-down broker closes its listener first and finishes what it
-    // started, holding the start-up lock the whole time, so spawning as soon as
-    // the ping fails produces a replacement that cannot start.
-    await sendBrokerRequest(existing, { type: "shutdown" }).catch(() => {});
-    const deadline = Date.now() + 3_000;
-    while (Date.now() < deadline && processExists(existing.pid)) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
+    // The shutdown is sent without waiting for it: a broker finishing an
+    // observer turn can take longer to exit than this hook is allowed to live.
+    void sendBrokerRequest(existing, { type: "shutdown" }).catch(() => {});
+    return null;
   }
+
   if (existing && !processExists(existing.pid))
     await removeBrokerFiles(existing, path);
   const child = spawn(
@@ -153,13 +169,14 @@ async function ensureBroker(): Promise<BrokerDescriptor> {
     },
   );
   child.unref();
-  const deadline = Date.now() + 3_000;
+  const deadline = Date.now() + BROKER_READY_BUDGET_MS;
   while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 25));
     const descriptor = await readBrokerDescriptor(path);
-    if (descriptor && (await ping(descriptor))) return descriptor;
+    if (descriptor && descriptor.build === build && (await ping(descriptor)))
+      return descriptor;
   }
-  throw new Error("The Subconscious broker did not start within 3 seconds.");
+  return null;
 }
 
 async function writeStdout(text: string): Promise<void> {
@@ -212,6 +229,7 @@ export async function runHook(harness: HarnessId): Promise<void> {
   const project = await findProjectConfig(target.workingDirectory);
   if (!project) return;
   const descriptor = await ensureBroker();
+  if (!descriptor) return;
   const event = nativeEvent(input);
 
   const channel = event ? adapter.contextChannel(event) : null;

@@ -111,9 +111,20 @@ async function serve(): Promise<void> {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
   } finally {
-    await broker.close();
+    // Shutting down does not wait on an observer turn. The broker sends a
+    // message and lets the agent answer if it chooses; nothing downstream is
+    // owed that answer, and a turn that never returns must not be able to hold
+    // the process, its lock, and every later hook behind it. Whatever was in
+    // flight is picked up as needs_reconciliation by the next start.
+    await Promise.race([
+      broker.close(),
+      new Promise((resolve) => setTimeout(resolve, 2_000).unref()),
+    ]);
     await removeBrokerFiles(descriptor, descriptorPath());
     await releaseLock();
+    // Anything the Agent SDK still holds open would keep the event loop alive
+    // long after the broker is finished with it.
+    process.exit(0);
   }
 }
 

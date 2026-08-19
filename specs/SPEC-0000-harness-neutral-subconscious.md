@@ -41,7 +41,11 @@ Adapters connect through a Unix domain socket on macOS and Linux. Windows adapte
 
 The broker outlives the code that started it. Its descriptor therefore records which build is serving, and an adapter that finds a live broker from another build stops it and starts its own. A liveness check alone would reuse a daemon that answers every request with older behavior, which reads as the new code silently doing nothing.
 
-A shutting-down broker closes its listener before it waits for the work it already started, because it does not cut a delivery or an observer turn in half. It therefore stops answering long before it exits, while still holding the start-up lock. `subconscious stop` waits for the process to leave rather than for the socket to go quiet, and an adapter replacing a stale broker waits the same way. Reading a failed ping as a stopped broker reports success and then fails to start, which leaves the session with no broker at all.
+Nothing waits on an observer turn. The broker sends a message and lets the agent answer if it chooses, and no part of the system is owed that answer. A turn therefore cannot hold a shutdown: the broker gives work in flight a short grace period, then exits and leaves whatever was running to be picked up as `needs_reconciliation` by the next start. Without that bound one stalled turn keeps the process, its start-up lock, and every later hook behind it.
+
+A shutting-down broker still closes its listener before that grace period, so it stops answering before it exits. `subconscious stop` waits for the process to leave rather than for the socket to go quiet. Reading a failed ping as a stopped broker reports success and then fails to start, which leaves the session with no broker at all.
+
+A hook never waits out broker start-up or replacement. The harness is on the other end of that wait, and it is short: Claude Code drops a tool-boundary hook after three seconds, so a hook that spends seconds acquiring a broker does not deliver a late whisper, it loses the boundary and the observation with it. A ready broker answers in about eighty milliseconds. When one is not ready, the hook starts or replaces it, gives it a quarter second, and otherwise emits nothing and returns. The cost is one skipped boundary, which is what a whisper is built to survive: it stays pending for the next one.
 
 The fingerprint is the entry point's path and modification time. It catches a different install location, an upgrade, and a rebuild. It does not catch editing a source file the entry point does not import directly, so `subconscious restart` remains the explicit control.
 
@@ -537,13 +541,15 @@ The CLI provides the following commands:
 
 - [x] The Claude Code adapter proves project discovery, incremental observation, and passive whisper delivery in the real CLI.
 - [x] The Claude Code adapter does not call Letta before each tool call. Tool-boundary delivery reaches the local broker only.
+- [x] A hook against a ready broker costs well under the tightest harness budget, and a hook against a missing or stale one gives up rather than spending that budget.
+- [x] Shutting down does not wait on an observer turn.
 - [x] Each adapter names the context channel for every event it claims, and claims none it cannot name.
 - [x] The installer registers every event an adapter claims a channel for, and no event it returns null for.
 - [x] Tool-level hooks are installed with the harness's own every-tool matcher, and simple events are installed without one.
 - [x] Rerunning `subconscious install` for a harness leaves exactly one Subconscious hook per event.
-- [x] The Codex adapter proves project discovery and incremental observation in the real CLI.
+- [ ] The Codex adapter proves project discovery and incremental observation in the real CLI.
 - [x] The Codex adapter exposes only live-tested passive and queue capabilities.
-- [x] The Letta Code adapter proves passive delivery through a real turn before release.
+- [ ] The Letta Code adapter proves passive delivery through a real turn before release.
 - [x] Each adapter reports unsupported capabilities without fallback behavior.
 - [x] Every adapter observes the user's prompt at submission, so the observation runs beside the turn that answers it rather than after it.
 - [x] A prompt observation carries the prompt text from the hook input, stays bounded, and leaves the transcript cursor unchanged.
