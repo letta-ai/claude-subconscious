@@ -304,6 +304,18 @@ Sending the wrong channel fails silently. The harness drops the output, no conte
 
 That silence is what makes the acknowledgement order matter: the broker marks a delivery delivered after the hook emits it, so an ignored emit spends the whisper permanently. An adapter therefore claims an event only when it can say which channel that event reads, and widening the claim is a live-test change rather than a guess.
 
+### Installed events follow the claim
+
+A claimed channel is inert until the harness is configured to call the hook on that event. `subconscious install` therefore registers exactly the events the adapter can act on: every event whose channel is non-null, plus the observation events the adapter normalizes. Registering less strands a claim that can never fire; registering more spends a process launch on an event the adapter drops.
+
+The installed list and the claimed channel are separate statements of the same intent, so they drift silently. Tests hold them to each other in both directions.
+
+Tool-level events additionally take a matcher, and the matcher syntax is the harness's, not the installer's. Codex matches with an unanchored regex, where `.*` reaches every tool. Letta Code anchors its regex but special-cases the literal `"*"` before the regex path, which makes `"*"` the canonical every-tool value there. Simple events take no matcher at all.
+
+Timeouts follow how often the event fires. Stop reads a transcript delta once per turn and gets ten seconds. The prompt boundaries get five. Tool hooks get three, because their budget is paid on every tool call rather than once per turn. Letta Code expresses all of these in milliseconds; Codex and Claude Code in seconds.
+
+Installation is idempotent. A hook whose command carries the `subconscious hook` marker already present on an event means that event is registered, so a rerun after an upgrade adds nothing and rewrites nothing the user changed.
+
 ## Initial adapters
 
 ### Claude Code
@@ -324,13 +336,13 @@ Codex hooks and app-server events provide the working directory, thread ID, and 
 
 The adapter must test passive hook context against Codex CLI 0.147.0 or later.
 
-Codex 0.147.0 ships a `hookSpecificOutput` schema for `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PreToolUse`, and `PostToolUse`. The adapter delivers on the prompt boundaries and both tool events. `SubagentStart` reaches the subagent rather than the route that caused the observation, so it stays unclaimed. `PermissionRequest`, `PreCompact`, `PostCompact`, and `SessionEnd` carry no context field.
+Codex 0.147.0 ships a `hookSpecificOutput` schema for `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PreToolUse`, and `PostToolUse`. The adapter delivers on the prompt boundaries and both tool events. `SubagentStart` reaches the subagent rather than the route that caused the observation, so it stays unclaimed. `PermissionRequest`, `PreCompact`, `PostCompact`, and `SessionEnd` carry no context field. The installer registers `SessionStart`, `UserPromptSubmit`, `Stop`, and both tool events in `$CODEX_HOME/hooks.json`, with `.*` as the tool matcher.
 
 The adapter must test `thread/inject_items`, `turn/steer`, and `turn/start` against an active app-server thread. It exposes only the operations that pass.
 
 ### Letta Code
 
-Letta Code reads context asymmetrically across the tool boundary. `PostToolUse` and `PostToolUseFailure` parse `additionalContext`, while `PreToolUse` consumes only `updatedInput`, so a whisper emitted before a tool call would be acknowledged and never seen. The adapter claims the two post-tool events and withholds `PreToolUse`.
+Letta Code reads context asymmetrically across the tool boundary. `PostToolUse` and `PostToolUseFailure` parse `additionalContext`, while `PreToolUse` consumes only `updatedInput`, so a whisper emitted before a tool call would be acknowledged and never seen. The adapter claims the two post-tool events and withholds `PreToolUse`. The installer registers `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure`, and `Stop` in the project's `.letta/settings.local.json`, with `"*"` as the tool matcher and `PreToolUse` absent.
 
 `SessionStart` and `UserPromptSubmit` push hook stdout into context verbatim. An envelope on those events would inject its own JSON as literal text, so they stay on the stdout channel.
 
@@ -429,6 +441,9 @@ The CLI provides the following commands:
 - [x] The Claude Code adapter proves project discovery, incremental observation, and passive whisper delivery in the real CLI.
 - [x] The Claude Code adapter does not call Letta before each tool call. Tool-boundary delivery reaches the local broker only.
 - [x] Each adapter names the context channel for every event it claims, and claims none it cannot name.
+- [x] The installer registers every event an adapter claims a channel for, and no event it returns null for.
+- [x] Tool-level hooks are installed with the harness's own every-tool matcher, and simple events are installed without one.
+- [x] Rerunning `subconscious install` for a harness leaves exactly one Subconscious hook per event.
 - [x] The Codex adapter proves project discovery and incremental observation in the real CLI.
 - [x] The Codex adapter exposes only live-tested passive and queue capabilities.
 - [x] The Letta Code adapter proves passive delivery through a real turn before release.
