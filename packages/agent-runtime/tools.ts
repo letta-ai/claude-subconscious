@@ -98,7 +98,7 @@ function deliveryTool(
     label: whisper ? "Send Whisper" : "Queue Message",
     description: whisper
       ? "Send concise passive context at the start of the next supported harness turn. Use only when the guidance changes the next step."
-      : "Queue one actionable message in the current harness session. Use only when the adapter exposes a verified queue.",
+      : "Send one actionable message that starts a new turn in the current harness session. Use only when the guidance cannot wait for the coding agent's next turn.",
     parameters: {
       type: "object",
       properties: {

@@ -222,7 +222,7 @@ A whisper enters model context at the start of the next supported harness turn. 
 
 ### `queue_message`
 
-`queue_message` asks an adapter to add an actionable message to the harness queue.
+`queue_message` adds an actionable message that starts a new coding-agent turn.
 
 ```ts
 interface QueueMessageInput {
@@ -231,19 +231,29 @@ interface QueueMessageInput {
 }
 ```
 
-The tool is available only when project configuration permits queued messages and the adapter supports them.
+The tool is available only when project configuration permits queued messages and the adapter supports them. `delivery.queue_messages` defaults to false, so a project opts in before the tool exists.
 
 An unsupported queue request returns a tool error. The broker does not convert it into a whisper.
 
-The tool targets only the harness route that caused the observer turn. An adapter must bind delivery to that native session and, when required, its expected active turn.
+The tool targets only the harness route that caused the observer turn. The model cannot select another session as its target.
 
-If the native session or turn no longer matches, the adapter reports a stale delivery. It does not inject the message into a replacement session.
+A queued message does not wait for a hook. A hook runs at a turn boundary the harness chose, which is exactly what an actionable message must not be bound to. The broker therefore delivers it itself, and only to a harness whose session it can address directly.
+
+A harness that runs as a Letta agent exposes its own Letta agent and conversation IDs on each event. Those IDs belong to the coding agent, never to the observer, and the broker records them on the route separately from the observer's agent and conversation. The broker sends the message into that conversation with the Agent SDK. The message is in the coding agent's context from its next turn onward.
+
+The delivery session carries no model and no client tools. A model would rewrite the coding agent's own configuration, and a client tool would make the broker process a device that executes the coding agent's tool calls.
+
+The broker acknowledges a queued message itself, because no hook is present to acknowledge it. The delivery ID travels as the send OTID, so a retry after an unknown transport result deduplicates instead of posting the message twice.
+
+If the conversation no longer belongs to the observed agent, the delivery is stale. It is never redirected into a replacement session. A transport failure leaves it pending with the reason recorded, and the next observer turn or broker start retries it.
 
 ### Delivery rule
 
 No delivery tool call means no user-visible output. The broker never relays the observer's final assistant text.
 
 Each delivery has a stable ID. Delivery is at least once. A crash after harness injection but before acknowledgement can repeat the same delivery ID.
+
+A whisper waits for the next harness delivery window. A queued message does not wait at all: the broker sends it as soon as the observer turn that produced it finishes.
 
 The observer prompt permits a delivery when stored or newly learned context can help the next turn. Useful context includes:
 
@@ -293,8 +303,11 @@ interface HarnessAdapter {
   formatWhispers(deliveries: DeliveryRecord[]): string;
   formatStatus(status: SessionStatus): string;
   contextChannel(nativeEvent: string): ContextChannel | null;
+  harnessLettaIdentity?(event: HarnessEvent): HarnessLettaIdentity | null;
 }
 ```
+
+A harness that is itself a Letta agent answers `harnessLettaIdentity` with the coding agent's own agent and conversation IDs. A foreign harness omits the method, and its queued messages have nowhere to go.
 
 ## Context channels
 
@@ -350,7 +363,7 @@ Letta Code hooks provide the working directory and structured turn fields. Sessi
 
 The hook executor supports passive `additionalContext`. The adapter must still pass a real turn test.
 
-The adapter must inspect the live message queue and mod APIs before it exposes `queue_message`.
+A Letta Code session is a Letta agent in a Letta conversation, so `queue_message` needs no harness queue API. The adapter reports the coding agent's agent and conversation IDs from hook input, and the broker writes the message into that conversation through the Agent SDK. Claude Code and Codex are foreign harnesses whose hooks cannot start a turn, so they keep `queue_message` disabled.
 
 ## Durable state
 
@@ -363,6 +376,7 @@ The broker stores the following state:
 - Pending whisper and queued-message deliveries.
 - Delivery attempts, native receipts, acknowledgements, and deduplication keys.
 - Agent ID, model, and Agent SDK connection identity.
+- The observed coding agent's own Letta agent and conversation, when the harness has them.
 
 State writes are atomic. One broker process owns writes. A stale process lock recovers without deleting pending deliveries.
 
@@ -433,6 +447,12 @@ The CLI provides the following commands:
 - [x] Automated tests cover duplicate tool calls and broker restarts before acknowledgement.
 - [x] Tests cover a crash after harness injection but before acknowledgement by reusing the same delivery ID.
 - [x] A stale native session or active-turn ID never redirects a delivery to a replacement session.
+- [x] `queue_message` reaches a Letta Code conversation through the Agent SDK without a hook lease.
+- [x] The broker acknowledges a directly delivered queued message itself.
+- [x] A queued message whose conversation changed owner is stale and is not redirected.
+- [x] A failed direct delivery stays pending, records the reason, and is retried after a broker restart.
+- [x] A project that has not set `queue_messages = true` sends nothing.
+- [ ] A live turn proves that a queued message reaches a running Letta Code conversation.
 - [x] The session status reaches the harness once per route and reports the agent, model, and delivery channels.
 - [x] A second status claim on the same route returns nothing.
 

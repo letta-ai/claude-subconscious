@@ -9,11 +9,11 @@ A Letta agent routes durable project information into MemFS. It retrieves releva
 Subconscious exposes two Agent SDK tools:
 
 - `send_whisper` stores passive context for the next harness turn.
-- `queue_message` requests a new harness message when the adapter has a verified queue.
+- `queue_message` sends an actionable message that starts a new harness turn.
 
 Subconscious discards ordinary assistant text. No delivery tool call means no harness output.
 
-The initial adapters support passive whispers. They keep `queue_message` disabled until a live harness test proves a queue operation.
+Every adapter supports passive whispers. Only Letta Code supports `queue_message`, because a Letta Code session is a Letta agent in a Letta conversation that the broker can write to directly. Claude Code and Codex are foreign harnesses whose hooks cannot start a turn, so they keep `queue_message` disabled. A project also has to set `queue_messages = true`, which is off by default.
 
 ## Architecture
 

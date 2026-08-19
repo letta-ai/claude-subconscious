@@ -24,13 +24,19 @@ export interface BrokerOptions {
   descriptor: BrokerDescriptor;
   stateDirectory: string;
   apiKey?: string;
-  runtime?:
-    | (Pick<AgentRuntime, "run"> &
-        Partial<Pick<AgentRuntime, "findConversationByOtid">>)
-    | null;
+  runtime?: BrokerRuntime | null;
   redactor?: ObservationRedactor;
   onShutdown?: () => void;
 }
+
+/**
+ * The slice of the Agent SDK runtime the broker needs. Only `run` is required,
+ * so a test can drive a real broker with a minimal fake.
+ */
+export type BrokerRuntime = Pick<AgentRuntime, "run"> &
+  Partial<
+    Pick<AgentRuntime, "findConversationByOtid" | "deliverQueuedMessage">
+  >;
 
 function now(): string {
   return new Date().toISOString();
@@ -43,10 +49,7 @@ function errorMessage(error: unknown): string {
 export class SubconsciousBroker {
   private readonly descriptor: BrokerDescriptor;
   private readonly store: StateStore;
-  private readonly runtime:
-    | (Pick<AgentRuntime, "run"> &
-        Partial<Pick<AgentRuntime, "findConversationByOtid">>)
-    | null;
+  private readonly runtime: BrokerRuntime | null;
   private readonly processingAgents = new Set<string>();
   private readonly activeDrains = new Set<Promise<void>>();
   private readonly onShutdown?: () => void;
@@ -74,6 +77,26 @@ export class SubconsciousBroker {
     const state = await this.store.snapshot();
     for (const route of Object.values(state.routes))
       this.schedule(route.agentId);
+    // A queued message is never handed to a hook, so nothing else would pick up
+    // one that was still pending when the previous broker stopped.
+    const stranded = new Set(
+      Object.values(state.deliveries)
+        .filter(
+          (delivery) =>
+            delivery.kind === "queued_message" && delivery.status === "pending",
+        )
+        .map((delivery) => delivery.routeKey),
+    );
+    for (const key of stranded) this.track(this.deliverQueuedMessages(key));
+  }
+
+  /**
+   * Keep a background task alive for close() to await, so a shutdown cannot cut
+   * a delivery in half.
+   */
+  private track(task: Promise<void>): void {
+    const tracked = task.finally(() => this.activeDrains.delete(tracked));
+    this.activeDrains.add(tracked);
   }
 
   async close(): Promise<void> {
@@ -135,7 +158,9 @@ export class SubconsciousBroker {
       sessionId: event.sessionId,
     };
     const key = routeKey(identity);
-    const capabilities = getAdapter(event.harness).capabilities;
+    const adapter = getAdapter(event.harness);
+    const capabilities = adapter.capabilities;
+    const harnessIdentity = adapter.harnessLettaIdentity?.(event) ?? null;
     const clientDeliveryTools: Array<"send_whisper" | "queue_message"> = [
       ...(project.config.delivery.whispers && capabilities.passiveContext
         ? (["send_whisper"] as const)
@@ -150,6 +175,10 @@ export class SubconsciousBroker {
       const timestamp = now();
       state.routes[key] ??= createRouteRecord(identity, timestamp);
       state.routes[key]!.clientDeliveryTools = clientDeliveryTools;
+      // Only overwrite when this event carried an identity. Letta Code Stop
+      // input has no conversation fields, and clearing the route on one of
+      // those would strand every queued message the session later earns.
+      if (harnessIdentity) state.routes[key]!.harnessIdentity = harnessIdentity;
       state.observations[event.id] = {
         event,
         routeKey: key,
@@ -202,6 +231,10 @@ export class SubconsciousBroker {
       const observation = await this.nextObservation(agentId);
       if (!observation) return;
       await this.processObservation(observation);
+      // A queued message must not wait for a hook lease, which is the entire
+      // point of the channel. Sending after the turn instead of inside the tool
+      // keeps a transport failure away from the observation that produced it.
+      await this.deliverQueuedMessages(observation.routeKey);
     }
   }
 
@@ -408,6 +441,117 @@ export class SubconsciousBroker {
     });
   }
 
+  /**
+   * Change one delivery, and only while it is still pending.
+   *
+   * Every other transition in the broker guards on `pending` too. Keeping the
+   * guard here means a slow direct send that finishes after a hook already
+   * acknowledged the same delivery cannot rewrite the acknowledgement.
+   */
+  private async updateDelivery(
+    id: string,
+    mutate: (delivery: DeliveryRecord) => void,
+  ): Promise<void> {
+    await this.store.update((state) => {
+      const delivery = state.deliveries[id];
+      if (!delivery || delivery.status !== "pending") return;
+      mutate(delivery);
+    });
+  }
+
+  /**
+   * Deliver every pending queued message on one route.
+   *
+   * A whisper waits for a hook to open a delivery window. A queued message
+   * cannot: it is meant to start a turn, and a harness that is itself a Letta
+   * agent has a conversation the broker can write to at any moment. So the
+   * broker sends it and acknowledges it itself. There is no hook in this path,
+   * which is why every outcome has to be recorded on the delivery here.
+   *
+   * This never throws. It runs behind an observer turn and at start-up, and a
+   * failed message must not take either of those down with it.
+   */
+  private async deliverQueuedMessages(routeKey: string): Promise<void> {
+    try {
+      const state = await this.store.snapshot();
+      const route = state.routes[routeKey];
+      const identity = route?.harnessIdentity;
+      if (!route || !identity) return;
+      const pending = Object.values(state.deliveries)
+        .filter(
+          (delivery) =>
+            delivery.routeKey === routeKey &&
+            delivery.kind === "queued_message" &&
+            delivery.status === "pending",
+        )
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      if (pending.length === 0) return;
+
+      const runtime = this.runtime;
+      if (!runtime?.deliverQueuedMessage) {
+        for (const delivery of pending) {
+          await this.updateDelivery(delivery.id, (record) => {
+            record.lastError =
+              "The broker has no Agent SDK runtime, so it cannot deliver a queued message.";
+          });
+        }
+        return;
+      }
+
+      // Configuration is read again rather than trusted from the turn that
+      // produced the delivery, so revoking the permission stops messages that
+      // have not gone out yet. They stay pending and go nowhere.
+      const project = await findProjectConfig(route.projectRoot);
+      if (!project?.config.delivery.queueMessages) return;
+      if (!getAdapter(route.harness).capabilities.queuedMessage) return;
+
+      for (const delivery of pending) {
+        const timestamp = now();
+        if (delivery.expiresAt <= timestamp) {
+          await this.updateDelivery(delivery.id, (record) => {
+            record.status = "expired";
+          });
+          continue;
+        }
+        let result;
+        try {
+          result = await runtime.deliverQueuedMessage({
+            identity,
+            deliveryId: delivery.id,
+            text: delivery.text,
+          });
+        } catch (error) {
+          result = { status: "retry" as const, error: errorMessage(error) };
+        }
+        await this.updateDelivery(delivery.id, (record) => {
+          record.attempts += 1;
+          record.lastAttemptAt = timestamp;
+          if (result.status === "delivered") {
+            record.status = "delivered";
+            record.acknowledgedAt = timestamp;
+            if (result.nativeReceipt)
+              record.nativeReceipt = result.nativeReceipt;
+            delete record.lastError;
+            return;
+          }
+          record.lastError =
+            result.error ??
+            `The queued message could not be delivered (${result.status}).`;
+          // Retry keeps the delivery pending for the next observer turn or
+          // broker start. Anything else means the target is gone for good, and
+          // the spec forbids redirecting it to a replacement session.
+          if (result.status !== "retry") record.status = "stale";
+        });
+      }
+    } catch (error) {
+      // Reaching here means the state store itself failed. The deliveries stay
+      // pending and the next drain retries them.
+      process.emitWarning(
+        `Subconscious could not drain queued messages: ${errorMessage(error)}`,
+      );
+    }
+  }
+
   private async targetRoute(
     target: DeliveryTarget,
   ): Promise<{ route: RouteRecord; config: ProjectConfig } | null> {
@@ -477,6 +621,11 @@ export class SubconsciousBroker {
         (!resolved.config.delivery.queueMessages ||
           !capabilities.queuedMessage))
     ) {
+      return { ok: true, type: "leased", deliveries: [] };
+    }
+    if (kind === "queued_message" && resolved.route.harnessIdentity) {
+      // The broker sends and acknowledges these itself. Leasing them to a hook
+      // as well would deliver the same message twice.
       return { ok: true, type: "leased", deliveries: [] };
     }
     const leased: DeliveryRecord[] = [];

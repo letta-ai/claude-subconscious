@@ -73,6 +73,21 @@ export interface SourceCursor {
   marker?: string;
 }
 
+/**
+ * The coding agent's own Letta identity, for a harness that is itself a Letta
+ * agent.
+ *
+ * Both IDs belong to the harness being observed, never to Subconscious. A route
+ * carries two unrelated agents and two unrelated conversations, and swapping
+ * them would send the observer's guidance to the observer. `RouteRecord.agentId`
+ * and `RouteRecord.conversationId` are always the observer's; everything under
+ * `RouteRecord.harnessIdentity` is always the coding agent's.
+ */
+export interface HarnessLettaIdentity {
+  agentId: string;
+  conversationId: string;
+}
+
 export interface RouteRecord {
   key: string;
   configPath: string;
@@ -82,6 +97,12 @@ export interface RouteRecord {
   harness: HarnessId;
   sessionId: string;
   conversationId: string | null;
+  /**
+   * The observed coding agent's Letta identity, when it has one. Present only
+   * for a harness that runs as a Letta agent, and the reason a queued message
+   * can reach that harness without a hook.
+   */
+  harnessIdentity?: HarnessLettaIdentity;
   clientDeliveryTools?: Array<"send_whisper" | "queue_message">;
   runtimeReportedTools?: string[];
   attachedServerTools?: string[];
@@ -148,6 +169,13 @@ export interface DeliveryRecord {
   lastAttemptAt?: string;
   acknowledgedAt?: string;
   nativeReceipt?: string;
+  /**
+   * Why the last attempt did not land. A hook-leased delivery never sets it,
+   * because a hook that fails simply stops acknowledging. A directly delivered
+   * message has no hook to report through, so the failure has to be recorded
+   * here or it disappears.
+   */
+  lastError?: string;
 }
 
 export interface BrokerState {
@@ -185,6 +213,16 @@ export interface HarnessAdapter {
   ): Promise<PreparedObservation>;
   formatWhispers(deliveries: DeliveryRecord[]): string;
   formatStatus(status: SessionStatus): string;
+  /**
+   * The coding agent's own Letta identity for this event, when the harness runs
+   * as a Letta agent.
+   *
+   * A harness that answers this can be handed a queued message straight into
+   * its conversation, with no hook and no turn boundary to wait for. A harness
+   * that is foreign to Letta omits the method, and its queued messages have
+   * nowhere to go.
+   */
+  harnessLettaIdentity?(event: HarnessEvent): HarnessLettaIdentity | null;
   /**
    * The channel this harness accepts context on for a native hook event, or
    * null when the event cannot carry any. An adapter claims an event only once

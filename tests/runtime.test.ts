@@ -424,3 +424,143 @@ describe("Agent SDK runtime", () => {
     });
   });
 });
+
+describe("direct queued-message delivery", () => {
+  function harnessClient(
+    conversation: { id: string; agent_id: string } | Error,
+    session = {
+      send: vi.fn(async () => {}),
+      close: vi.fn(),
+      conversationId: "conv-harness",
+    },
+  ) {
+    const captured: { options?: LettaCodeClientSessionOptions } = {};
+    const client = {
+      conversations: {
+        retrieve: vi.fn(async () => {
+          if (conversation instanceof Error) throw conversation;
+          return conversation;
+        }),
+      },
+      resumeSession: vi.fn(
+        (_id: string, options: LettaCodeClientSessionOptions) => {
+          captured.options = options;
+          return session;
+        },
+      ),
+    };
+    return { client, captured, session };
+  }
+
+  const identity = {
+    agentId: "agent-harness",
+    conversationId: "conv-harness",
+  };
+
+  it("writes into the coding agent's conversation with no hook and no tools", async () => {
+    const { client, captured, session } = harnessClient({
+      id: "conv-harness",
+      agent_id: "agent-harness",
+    });
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: client as unknown as LettaAgentClient,
+    });
+
+    const result = await runtime.deliverQueuedMessage({
+      identity,
+      deliveryId: "delivery-one",
+      text: "The migration has to run before the deploy.",
+    });
+
+    expect(result).toEqual({
+      status: "delivered",
+      nativeReceipt: "conv-harness",
+    });
+    expect(client.resumeSession).toHaveBeenCalledWith(
+      "conv-harness",
+      expect.anything(),
+    );
+    // The delivery ID doubles as the OTID so a retry deduplicates server side.
+    expect(session.send).toHaveBeenCalledWith(
+      "The migration has to run before the deploy.",
+      { otid: "delivery-one" },
+    );
+    expect(session.close).toHaveBeenCalledOnce();
+    // A model would rewrite the coding agent's own configuration, and a client
+    // tool would make the broker execute the coding agent's tool calls.
+    expect(captured.options?.model).toBeUndefined();
+    expect(captured.options?.allowedTools).toEqual([]);
+    expect(captured.options?.toolset).toEqual({ base: "none", include: [] });
+    expect(
+      captured.options?.canUseTool?.("Bash", {}, {
+        signal: new AbortController().signal,
+      } as never),
+    ).toMatchObject({ behavior: "deny" });
+  });
+
+  it("reports a conversation that changed owner as stale", async () => {
+    const { client, session } = harnessClient({
+      id: "conv-harness",
+      agent_id: "agent-someone-else",
+    });
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: client as unknown as LettaAgentClient,
+    });
+
+    const result = await runtime.deliverQueuedMessage({
+      identity,
+      deliveryId: "delivery-one",
+      text: "Do not send this to a replacement session.",
+    });
+
+    expect(result.status).toBe("stale");
+    expect(client.resumeSession).not.toHaveBeenCalled();
+    expect(session.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps a transport failure retryable", async () => {
+    const { client } = harnessClient(new Error("conversation lookup failed"));
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: client as unknown as LettaAgentClient,
+    });
+
+    const result = await runtime.deliverQueuedMessage({
+      identity,
+      deliveryId: "delivery-one",
+      text: "Retry me.",
+    });
+
+    expect(result.status).toBe("retry");
+    expect(result.error).toContain("conversation lookup failed");
+  });
+
+  it("keeps a rejected send retryable and closes the session", async () => {
+    const session = {
+      send: vi.fn(async () => {
+        throw new Error("socket closed");
+      }),
+      close: vi.fn(),
+      conversationId: "conv-harness",
+    };
+    const { client } = harnessClient(
+      { id: "conv-harness", agent_id: "agent-harness" },
+      session,
+    );
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: client as unknown as LettaAgentClient,
+    });
+
+    const result = await runtime.deliverQueuedMessage({
+      identity,
+      deliveryId: "delivery-one",
+      text: "Retry me.",
+    });
+
+    expect(result).toEqual({ status: "retry", error: "socket closed" });
+    expect(session.close).toHaveBeenCalledOnce();
+  });
+});

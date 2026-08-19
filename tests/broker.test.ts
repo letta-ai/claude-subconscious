@@ -3,7 +3,10 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { SubconsciousBroker } from "../packages/cli/broker.js";
+import {
+  SubconsciousBroker,
+  type BrokerRuntime,
+} from "../packages/cli/broker.js";
 import {
   deliveryId,
   sendBrokerRequest,
@@ -12,9 +15,15 @@ import {
   type DeliveryRecord,
 } from "../packages/core/index.js";
 import type {
+  QueuedMessageDelivery,
+  QueuedMessageResult,
   RunObservationInput,
   RunObservationResult,
 } from "../packages/agent-runtime/index.js";
+
+type QueuedMessageDeliverer = (
+  input: QueuedMessageDelivery,
+) => Promise<QueuedMessageResult>;
 
 const roots: string[] = [];
 
@@ -664,6 +673,268 @@ describe("session status claim", () => {
         type: "session_status",
         status: null,
       });
+    } finally {
+      await broker.close();
+    }
+  });
+});
+
+describe("direct queued messages", () => {
+  async function project(queueMessages = true): Promise<string> {
+    const directory = await root();
+    await writeProjectConfig(directory, {
+      version: 1,
+      agentId: "agent-observer",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages },
+      observer: {},
+    });
+    return directory;
+  }
+
+  function socket(directory: string, name: string): BrokerDescriptor {
+    return {
+      version: 1,
+      endpoint:
+        process.platform === "win32"
+          ? `\\\\.\\pipe\\subconscious-test-${randomUUID()}`
+          : join(directory, `${name}.sock`),
+      token: "test-token",
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    };
+  }
+
+  function lettaCodeEvent(directory: string, id: string) {
+    return {
+      id,
+      harness: "letta-code" as const,
+      type: "user_prompt" as const,
+      sessionId: "conv-harness",
+      workingDirectory: directory,
+      occurredAt: new Date().toISOString(),
+      payload: {
+        agent_id: "agent-harness",
+        conversation_id: "conv-harness",
+        prompt: "Ship the release.",
+      },
+    };
+  }
+
+  function queueingRuntime(
+    deliverQueuedMessage?: QueuedMessageDeliverer,
+  ): BrokerRuntime {
+    return {
+      run: async (
+        input: RunObservationInput,
+      ): Promise<RunObservationResult> => {
+        await input.persistDelivery({
+          id: deliveryId(input.event.id, "queued_message", "act-now"),
+          routeKey: input.route.key,
+          observationId: input.event.id,
+          kind: "queued_message",
+          text: "Run the migration before the deploy.",
+          priority: "normal",
+          dedupeKey: "act-now",
+          status: "pending",
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          attempts: 0,
+        });
+        return {
+          status: "success",
+          conversationId: "conv-observer",
+          result: {
+            type: "result",
+            success: true,
+            durationMs: 1,
+            conversationId: "conv-observer",
+            runIds: ["run-observer"],
+          },
+        };
+      },
+      ...(deliverQueuedMessage ? { deliverQueuedMessage } : {}),
+    };
+  }
+
+  async function deliveries(
+    descriptor: BrokerDescriptor,
+  ): Promise<Record<string, DeliveryRecord>> {
+    const response = await sendBrokerRequest(descriptor, { type: "status" });
+    if (!response.ok || response.type !== "status")
+      throw new Error("Missing broker status.");
+    return response.state.deliveries;
+  }
+
+  it("delivers into the Letta Code conversation without a hook lease", async () => {
+    const directory = await project();
+    const descriptor = socket(directory, "queue");
+    const sent: QueuedMessageDelivery[] = [];
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime: queueingRuntime(async (input) => {
+        sent.push(input);
+        return { status: "delivered", nativeReceipt: "conv-harness" };
+      }),
+    });
+    await broker.start();
+    try {
+      await sendBrokerRequest(descriptor, {
+        type: "observe",
+        event: lettaCodeEvent(directory, "event-queue"),
+      });
+      const id = deliveryId("event-queue", "queued_message", "act-now");
+      await waitFor(
+        async () => (await deliveries(descriptor))[id] !== undefined,
+      );
+      await waitFor(
+        async () => (await deliveries(descriptor))[id]?.status === "delivered",
+      );
+
+      // The message went to the coding agent, never to the observer.
+      expect(sent).toHaveLength(1);
+      expect(sent[0]?.identity).toEqual({
+        agentId: "agent-harness",
+        conversationId: "conv-harness",
+      });
+      expect(sent[0]?.deliveryId).toBe(id);
+      expect(sent[0]?.text).toBe("Run the migration before the deploy.");
+
+      const record = (await deliveries(descriptor))[id];
+      expect(record?.acknowledgedAt).toBeTruthy();
+      expect(record?.nativeReceipt).toBe("conv-harness");
+      expect(record?.attempts).toBe(1);
+      expect(record?.lastError).toBeUndefined();
+
+      // No hook ever asks for it, and one that did would get nothing.
+      const leased = await sendBrokerRequest(descriptor, {
+        type: "lease",
+        target: {
+          harness: "letta-code",
+          sessionId: "conv-harness",
+          workingDirectory: directory,
+        },
+        kind: "queued_message",
+      });
+      expect(
+        leased.ok && leased.type === "leased" ? leased.deliveries : [],
+      ).toHaveLength(0);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("marks a queued message stale when the conversation changed owner", async () => {
+    const directory = await project();
+    const descriptor = socket(directory, "stale");
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime: queueingRuntime(async () => ({
+        status: "stale",
+        error: "Conversation conv-harness belongs to another agent.",
+      })),
+    });
+    await broker.start();
+    try {
+      await sendBrokerRequest(descriptor, {
+        type: "observe",
+        event: lettaCodeEvent(directory, "event-stale"),
+      });
+      const id = deliveryId("event-stale", "queued_message", "act-now");
+      await waitFor(
+        async () => (await deliveries(descriptor))[id]?.status === "stale",
+      );
+      expect((await deliveries(descriptor))[id]?.lastError).toContain(
+        "another agent",
+      );
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("keeps a failed queued message pending and retries it after a restart", async () => {
+    const directory = await project();
+    const descriptor = socket(directory, "retry");
+    let attempts = 0;
+    const runtime = queueingRuntime(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("socket closed");
+      return { status: "delivered", nativeReceipt: "conv-harness" };
+    });
+    let broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime,
+    });
+    await broker.start();
+    const id = deliveryId("event-retry", "queued_message", "act-now");
+    try {
+      await sendBrokerRequest(descriptor, {
+        type: "observe",
+        event: lettaCodeEvent(directory, "event-retry"),
+      });
+      // A send that throws must not fail the observation that produced it.
+      await waitFor(async () => {
+        const response = await sendBrokerRequest(descriptor, {
+          type: "status",
+        });
+        return (
+          response.ok &&
+          response.type === "status" &&
+          response.state.observations["event-retry"]?.status === "processed" &&
+          response.state.deliveries[id]?.attempts === 1
+        );
+      });
+      const failed = (await deliveries(descriptor))[id];
+      expect(failed?.status).toBe("pending");
+      expect(failed?.lastError).toContain("socket closed");
+    } finally {
+      await broker.close();
+    }
+
+    broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime,
+    });
+    await broker.start();
+    try {
+      await waitFor(
+        async () => (await deliveries(descriptor))[id]?.status === "delivered",
+      );
+      expect(attempts).toBe(2);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("sends nothing when the project has not opted in", async () => {
+    const directory = await project(false);
+    const descriptor = socket(directory, "disabled");
+    const sent: QueuedMessageDelivery[] = [];
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime: queueingRuntime(async (input) => {
+        sent.push(input);
+        return { status: "delivered" };
+      }),
+    });
+    await broker.start();
+    try {
+      await sendBrokerRequest(descriptor, {
+        type: "observe",
+        event: lettaCodeEvent(directory, "event-disabled"),
+      });
+      const id = deliveryId("event-disabled", "queued_message", "act-now");
+      await waitFor(
+        async () => (await deliveries(descriptor))[id] !== undefined,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(sent).toHaveLength(0);
+      expect((await deliveries(descriptor))[id]?.status).toBe("pending");
     } finally {
       await broker.close();
     }

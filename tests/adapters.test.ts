@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { claudeCodeAdapter } from "../packages/adapter-claude-code/index.js";
 import { codexAdapter } from "../packages/adapter-codex/index.js";
 import { lettaCodeAdapter } from "../packages/adapter-letta-code/index.js";
+import type { HarnessAdapter } from "../packages/core/index.js";
 
 const roots: string[] = [];
 
@@ -121,6 +122,44 @@ describe("harness adapters", () => {
     expect(
       (await lettaCodeAdapter.prepareObservation(event!, undefined)).text,
     ).toContain("Check the release order.");
+  });
+
+  it("exposes a queue only for the harness that is itself a Letta agent", () => {
+    expect(lettaCodeAdapter.capabilities.queuedMessage).toBe(true);
+    expect(claudeCodeAdapter.capabilities.queuedMessage).toBe(false);
+    expect(codexAdapter.capabilities.queuedMessage).toBe(false);
+    // A foreign harness has no Letta identity to address, so it cannot answer
+    // the question at all.
+    const foreign: HarnessAdapter[] = [claudeCodeAdapter, codexAdapter];
+    for (const adapter of foreign) {
+      expect(adapter.harnessLettaIdentity).toBeUndefined();
+    }
+  });
+
+  it("reads the Letta Code agent's own identity from the hook payload", async () => {
+    const directory = await root();
+    const event = await lettaCodeAdapter.normalizeHookInput({
+      event_type: "UserPromptSubmit",
+      working_directory: directory,
+      conversation_id: "conv-harness",
+      agent_id: "agent-harness",
+      prompt: "Check the release order.",
+    });
+    expect(lettaCodeAdapter.harnessLettaIdentity!(event!)).toEqual({
+      agentId: "agent-harness",
+      conversationId: "conv-harness",
+    });
+  });
+
+  it("refuses a half Letta Code identity", async () => {
+    const directory = await root();
+    const event = await lettaCodeAdapter.normalizeHookInput({
+      event_type: "UserPromptSubmit",
+      working_directory: directory,
+      conversation_id: "conv-harness",
+      prompt: "Check the release order.",
+    });
+    expect(lettaCodeAdapter.harnessLettaIdentity!(event!)).toBeNull();
   });
 
   it("skips Letta Code Stop events that have no conversation identity", async () => {

@@ -5,8 +5,10 @@ import {
 } from "@letta-ai/letta-agent-sdk";
 import type {
   AdapterCapabilities,
+  AdapterDeliveryResult,
   DeliveryRecord,
   HarnessEvent,
+  HarnessLettaIdentity,
   PreparedObservation,
   ProjectConfig,
   RouteRecord,
@@ -63,6 +65,23 @@ export interface OtidConversationMatch {
   conversationId: string;
 }
 
+export interface QueuedMessageDelivery {
+  /** The coding agent and conversation that receive the message. */
+  identity: HarnessLettaIdentity;
+  /**
+   * The stable delivery ID. It travels as the send OTID so a retry after an
+   * unknown transport result deduplicates instead of posting the text twice.
+   */
+  deliveryId: string;
+  text: string;
+}
+
+/**
+ * Outcome of one direct delivery attempt. `error` explains a `retry` or a
+ * `stale`, which no hook is present to report.
+ */
+export type QueuedMessageResult = AdapterDeliveryResult & { error?: string };
+
 export type RunObservationResult =
   | {
       status: "success";
@@ -77,6 +96,10 @@ export type RunObservationResult =
       error: string;
       result?: SDKResultMessage;
     };
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function resultError(result: SDKResultMessage): string {
   return (
@@ -179,6 +202,71 @@ export class AgentRuntime {
       if (!next || seenPages.has(next)) return null;
       seenPages.add(next);
       after = next;
+    }
+  }
+
+  /**
+   * Put an actionable message into a coding agent's own Letta conversation.
+   *
+   * This is why `queue_message` can exist for Letta Code at all. The target is
+   * a Letta conversation, so the broker writes into it with the Agent SDK
+   * instead of waiting for a hook to open a delivery window. The message is in
+   * the coding agent's context from its next turn onward.
+   *
+   * The session deliberately carries no model and no tools. A model would
+   * rewrite the coding agent's own configuration, and any client tool would
+   * make the broker process a device that executes the coding agent's tool
+   * calls. Subconscious is delivering a message here, not running the harness.
+   */
+  async deliverQueuedMessage(
+    input: QueuedMessageDelivery,
+  ): Promise<QueuedMessageResult> {
+    const { identity } = input;
+    let conversation;
+    try {
+      conversation = await this.client.conversations.retrieve(
+        identity.conversationId,
+      );
+    } catch (error) {
+      // A lookup that fails is usually transport, not a deleted conversation,
+      // so the delivery stays pending rather than being written off as stale.
+      return {
+        status: "retry",
+        error: `The Letta Code conversation ${identity.conversationId} could not be read: ${errorMessage(error)}`,
+      };
+    }
+    if (conversation.agent_id !== identity.agentId) {
+      // The conversation belongs to another agent now. A queued message must
+      // never land in a replacement session, so it stops here permanently.
+      return {
+        status: "stale",
+        error: `Conversation ${identity.conversationId} belongs to ${conversation.agent_id}, not to the observed agent ${identity.agentId}.`,
+      };
+    }
+    let session: ReturnType<LettaAgentClient["resumeSession"]> | null = null;
+    try {
+      session = this.client.resumeSession(identity.conversationId, {
+        allowedTools: [],
+        toolset: { base: "none", include: [] },
+        permissionMode: "standard",
+        canUseTool: (toolName: string) => ({
+          behavior: "deny" as const,
+          message: `Subconscious opened this session only to deliver a message. Tool ${toolName} is not available on it.`,
+          interrupt: false,
+        }),
+        skillSources: [],
+        dreaming: { trigger: "off" },
+        env: { LETTA_API_KEY: this.apiKey },
+      });
+      await session.send(input.text, { otid: input.deliveryId });
+      // The stream is not drained. The message is persisted in the conversation
+      // once send resolves, and the coding agent's turn is its own business and
+      // can outlast this process by minutes.
+      return { status: "delivered", nativeReceipt: identity.conversationId };
+    } catch (error) {
+      return { status: "retry", error: errorMessage(error) };
+    } finally {
+      session?.close();
     }
   }
 

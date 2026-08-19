@@ -9,6 +9,7 @@ import {
   type DeliveryRecord,
   type HarnessAdapter,
   type HarnessEvent,
+  type HarnessLettaIdentity,
   type PreparedObservation,
   type SessionStatus,
   type SourceCursor,
@@ -26,7 +27,12 @@ export class LettaCodeAdapter implements HarnessAdapter {
   readonly id = "letta-code" as const;
   readonly capabilities = {
     passiveContext: true,
-    queuedMessage: false,
+    // Letta Code is not a foreign harness: the session it runs is a Letta agent
+    // in a Letta conversation, so the broker adds a queued message to that
+    // conversation through the Agent SDK. No hook carries it and no turn
+    // boundary gates it, which is what makes an actionable message possible
+    // here and impossible in Claude Code and Codex.
+    queuedMessage: true,
     transcript: "events" as const,
   };
 
@@ -114,6 +120,23 @@ export class LettaCodeAdapter implements HarnessAdapter {
 
   formatStatus(status: SessionStatus): string {
     return formatSessionStatus(status);
+  }
+
+  /**
+   * The coding agent behind this hook, not the observer.
+   *
+   * `sessionId` already carries the Letta Code conversation, but a queued
+   * message is addressed to an agent as well as a conversation, and reading
+   * both from the payload keeps the pair consistent. The hook fills `agent_id`
+   * from its input or from AGENT_ID/LETTA_AGENT_ID; an event without it cannot
+   * be addressed and returns null rather than a half identity.
+   */
+  harnessLettaIdentity(event: HarnessEvent): HarnessLettaIdentity | null {
+    const agentId = stringValue(event.payload.agent_id);
+    const conversationId =
+      stringValue(event.payload.conversation_id) ?? event.sessionId;
+    if (!agentId || !conversationId) return null;
+    return { agentId, conversationId };
   }
 
   contextChannel(nativeEvent: string): ContextChannel | null {
