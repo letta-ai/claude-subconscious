@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -570,6 +570,94 @@ describe("broker lifecycle", () => {
           ? leased.deliveries[0]?.text
           : null,
       ).toBe("Survived restart.");
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("never persists an unbounded observation payload", async () => {
+    const directory = await root();
+    await writeProjectConfig(directory, {
+      version: 1,
+      agentId: "agent-test",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages: false },
+      observer: {},
+    });
+    const descriptor: BrokerDescriptor = {
+      version: 1,
+      endpoint:
+        process.platform === "win32"
+          ? `\\\\.\\pipe\\subconscious-test-${randomUUID()}`
+          : join(directory, "broker.sock"),
+      token: "test-token",
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    };
+    let seenPayload: Record<string, unknown> = {};
+    const runtime = {
+      run: async (
+        input: RunObservationInput,
+      ): Promise<RunObservationResult> => {
+        seenPayload = input.event.payload;
+        return {
+          status: "success",
+          conversationId: "conv-observer",
+          result: {
+            type: "result",
+            success: true,
+            durationMs: 1,
+            conversationId: "conv-observer",
+            runIds: ["run-observer"],
+          },
+        };
+      },
+    };
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime,
+    });
+    await broker.start();
+    try {
+      const huge = "x".repeat(400_000);
+      await sendBrokerRequest(descriptor, {
+        type: "observe",
+        event: {
+          id: "huge-event",
+          harness: "claude-code",
+          type: "session_start",
+          sessionId: "huge-session",
+          workingDirectory: directory,
+          occurredAt: new Date().toISOString(),
+          payload: {
+            transcript_path: join(directory, "transcript.jsonl"),
+            tool_input: { command: huge },
+            tool_response: huge,
+          },
+        },
+      });
+      await waitFor(async () => {
+        const response = await sendBrokerRequest(descriptor, {
+          type: "status",
+        });
+        return (
+          response.ok &&
+          response.type === "status" &&
+          response.state.observations["huge-event"]?.status === "processed"
+        );
+      });
+      // The turn still saw the small fields it routes on, and never the
+      // megabyte the harness sent.
+      expect(seenPayload.transcript_path).toBe(
+        join(directory, "transcript.jsonl"),
+      );
+      expect(JSON.stringify(seenPayload).length).toBeLessThan(200_000);
+      // A processed observation can never be re-prepared, so nothing of the
+      // payload survives on disk.
+      const persisted = await readFile(join(directory, "state.json"), "utf8");
+      expect(persisted).not.toContain("x".repeat(1_000));
+      expect(persisted.length).toBeLessThan(100_000);
     } finally {
       await broker.close();
     }

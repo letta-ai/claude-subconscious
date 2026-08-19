@@ -1,6 +1,7 @@
 import type { Server } from "node:net";
 import { AgentRuntime } from "../agent-runtime/index.js";
 import {
+  boundPayload,
   createBrokerServer,
   createRouteRecord,
   findProjectConfig,
@@ -44,6 +45,16 @@ function now(): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Copy one record out of the live state read by `StateStore.read`.
+ *
+ * The selector is handed the store's own object, so anything that outlives the
+ * selector has to be a copy or a later mutation would be visible through it.
+ */
+function cloneOrNull<T>(value: T | undefined): T | null {
+  return value ? structuredClone(value) : null;
 }
 
 export class SubconsciousBroker {
@@ -180,7 +191,11 @@ export class SubconsciousBroker {
       // those would strand every queued message the session later earns.
       if (harnessIdentity) state.routes[key]!.harnessIdentity = harnessIdentity;
       state.observations[event.id] = {
-        event,
+        // The stored payload is clamped, not the one the route identity was
+        // read from above. `prepareObservation` runs later against this record,
+        // so what is stored is what an adapter will see, and a harness payload
+        // has no size an adapter can rely on.
+        event: { ...event, payload: boundPayload(event.payload) },
         routeKey: key,
         config: project.config,
         status: "queued",
@@ -210,20 +225,26 @@ export class SubconsciousBroker {
   private async nextObservation(
     agentId: string,
   ): Promise<ObservationRecord | null> {
-    const state = await this.store.snapshot();
-    const blockedRoutes = new Set(
-      Object.values(state.observations)
-        .filter((observation) => observation.status === "needs_reconciliation")
-        .map((observation) => observation.routeKey),
-    );
-    for (const id of state.observationOrder) {
-      const observation = state.observations[id];
-      if (!observation || observation.status !== "queued") continue;
-      if (blockedRoutes.has(observation.routeKey)) continue;
-      const route = state.routes[observation.routeKey];
-      if (route?.agentId === agentId) return observation;
-    }
-    return null;
+    // The drain loop calls this once per observation, so it reads the live
+    // state and copies only the record it selects. Cloning the whole state here
+    // made one drain cost time proportional to the entire observation history.
+    return await this.store.read((state) => {
+      const blockedRoutes = new Set(
+        Object.values(state.observations)
+          .filter(
+            (observation) => observation.status === "needs_reconciliation",
+          )
+          .map((observation) => observation.routeKey),
+      );
+      for (const id of state.observationOrder) {
+        const observation = state.observations[id];
+        if (!observation || observation.status !== "queued") continue;
+        if (blockedRoutes.has(observation.routeKey)) continue;
+        const route = state.routes[observation.routeKey];
+        if (route?.agentId === agentId) return structuredClone(observation);
+      }
+      return null;
+    });
   }
 
   private async drainAgent(agentId: string): Promise<void> {
@@ -241,8 +262,9 @@ export class SubconsciousBroker {
   private async processObservation(
     observation: ObservationRecord,
   ): Promise<boolean> {
-    const state = await this.store.snapshot();
-    const route = state.routes[observation.routeKey];
+    const route = await this.store.read((state) =>
+      cloneOrNull(state.routes[observation.routeKey]),
+    );
     if (!route) {
       await this.failObservation(
         observation.event.id,
@@ -473,18 +495,22 @@ export class SubconsciousBroker {
    */
   private async deliverQueuedMessages(routeKey: string): Promise<void> {
     try {
-      const state = await this.store.snapshot();
-      const route = state.routes[routeKey];
+      const { route, pending } = await this.store.read((state) => ({
+        route: cloneOrNull(state.routes[routeKey]),
+        pending: Object.values(state.deliveries)
+          .filter(
+            (delivery) =>
+              delivery.routeKey === routeKey &&
+              delivery.kind === "queued_message" &&
+              delivery.status === "pending",
+          )
+          .map((delivery) => structuredClone(delivery)),
+      }));
       const identity = route?.harnessIdentity;
       if (!route || !identity) return;
-      const pending = Object.values(state.deliveries)
-        .filter(
-          (delivery) =>
-            delivery.routeKey === routeKey &&
-            delivery.kind === "queued_message" &&
-            delivery.status === "pending",
-        )
-        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      pending.sort((left, right) =>
+        left.createdAt.localeCompare(right.createdAt),
+      );
       if (pending.length === 0) return;
 
       const runtime = this.runtime;
@@ -565,8 +591,11 @@ export class SubconsciousBroker {
       harness: target.harness,
       sessionId: target.sessionId,
     });
-    const state = await this.store.snapshot();
-    const route = state.routes[key];
+    // A hook leases on every tool call, so this path must not clone the whole
+    // state to read one route.
+    const route = await this.store.read((state) =>
+      cloneOrNull(state.routes[key]),
+    );
     return route ? { route, config: project.config } : null;
   }
 

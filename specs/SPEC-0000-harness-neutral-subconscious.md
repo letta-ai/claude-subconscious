@@ -380,6 +380,25 @@ The broker stores the following state:
 
 State writes are atomic. One broker process owns writes. A stale process lock recovers without deleting pending deliveries.
 
+### Retention
+
+State is a single file that one writer rewrites on every mutation, so anything kept forever is paid for on every later write rather than once. The broker therefore bounds both what an observation record holds and how long it is held.
+
+Retention runs on the writer's side of every state write. The file on disk is always the pruned one, and a `state.json` inherited from a build that never pruned is repaired by the first write a broker makes, which is the interrupted-observation recovery during start-up. Reading such a file never fails, and `subconscious status` still changes nothing.
+
+An observation is never pruned while it is `queued`, `processing`, or `needs_reconciliation`. The first two are the broker's own work list. The third blocks every later observation on its route until a human runs `subconscious reconcile <event-id>`, so removing one would unblock the route silently and destroy the only handle the human has on it.
+
+Everything else is pruned by age and by count, in two buckets:
+
+- `processed` and `discarded` are history. Nothing acts on them again and status output only counts them. They are kept for 24 hours and at most 200 records.
+- `failed` is an operator to-do, because `subconscious reconcile --retry` still accepts it. It is kept for 7 days and at most 200 records.
+
+The caps apply per bucket, so a burst of successful turns cannot evict a failure nobody has looked at yet.
+
+A delivery is pruned with the observation that produced it, and only once it is no longer actionable. A pending delivery that has not expired always survives, because a pending delivery must live until an adapter acknowledges it.
+
+Stored event payloads are bounded twice. At intake the broker clamps the payload: long strings are truncated, and if the result is still over budget the largest remaining top-level fields are dropped and named, so the small identity fields adapters read by name always survive. When an observation reaches `processed` or `discarded` the payload is dropped entirely, because no code path can re-prepare from those two states and a retry from `failed` or `needs_reconciliation` still needs the event as sent.
+
 The observation cursor advances only after the Agent SDK turn succeeds. A delivery remains pending until its adapter acknowledges it.
 
 If a failure occurs after `send()` can have reached the runtime, the broker marks the event `needs_reconciliation`. Later observations on that route stay queued. `subconscious reconcile <event-id> --retry` checks recent Letta conversations for the `otid` before it retries. If the `otid` exists, the broker binds the route to that conversation and requires explicit discard after inspection. `--discard` releases the route without another observer turn.

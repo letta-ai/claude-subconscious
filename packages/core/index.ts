@@ -5,6 +5,7 @@ export * from "./jsonl.js";
 export * from "./paths.js";
 export * from "./protocol.js";
 export * from "./redaction.js";
+export * from "./retention.js";
 export * from "./routing.js";
 export * from "./state.js";
 export * from "./status.js";

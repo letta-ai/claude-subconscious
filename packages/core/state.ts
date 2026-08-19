@@ -9,6 +9,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import {
+  applyRetention,
+  DEFAULT_RETENTION,
+  type RetentionPolicy,
+} from "./retention.js";
 import type { BrokerState } from "./types.js";
 
 export function createEmptyState(): BrokerState {
@@ -53,11 +58,16 @@ export async function atomicWriteFile(
 
 export class StateStore {
   readonly path: string;
+  private readonly retention: RetentionPolicy;
   private state: BrokerState | null = null;
   private current: Promise<unknown> = Promise.resolve();
 
-  constructor(stateDirectory: string) {
+  constructor(
+    stateDirectory: string,
+    retention: RetentionPolicy = DEFAULT_RETENTION,
+  ) {
     this.path = join(stateDirectory, "state.json");
+    this.retention = retention;
   }
 
   async load(): Promise<BrokerState> {
@@ -75,12 +85,33 @@ export class StateStore {
     return structuredClone(await this.load());
   }
 
+  /**
+   * Read the live state without copying it.
+   *
+   * `select` runs synchronously against the store's own object, so it observes
+   * exactly the instant a `snapshot()` clone would and still cannot interleave
+   * with the serialized writer. The caller must neither change nor retain what
+   * it is handed: clone whatever the selector returns.
+   *
+   * This exists because the drain loop asks for the next queued observation
+   * once per iteration. Cloning the whole state each time made the cost of
+   * draining one observation grow with the size of the entire state.
+   */
+  async read<T>(select: (state: BrokerState) => T): Promise<T> {
+    return select(await this.load());
+  }
+
   async update<T>(mutate: (state: BrokerState) => T | Promise<T>): Promise<T> {
     const previous = this.current.catch(() => undefined);
     let result!: T;
     this.current = previous.then(async () => {
       const state = await this.load();
       result = await mutate(state);
+      // Retention runs on the writer's side of every write, so the file on disk
+      // is always the pruned one. An oversized `state.json` inherited from an
+      // older build is therefore repaired by the first write a broker makes,
+      // which is `recoverInterrupted()` during start-up.
+      applyRetention(state, this.retention);
       await atomicWriteFile(this.path, `${JSON.stringify(state, null, 2)}\n`);
     });
     await this.current;
