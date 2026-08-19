@@ -1,0 +1,7 @@
+version = 1
+agent_id = "agent-2055f13e-f4e0-4d84-9706-eced3c5737f7"
+model = "letta/auto"
+
+[delivery]
+whispers = true
+queue_messages = false

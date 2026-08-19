@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced the Claude-specific worker with one harness-neutral broker for Claude Code, Codex, and Letta Code.
+- Replaced `@letta-ai/letta-code-sdk` and direct Letta REST requests with `@letta-ai/letta-agent-sdk`.
+- Changed the default observer model to `letta/auto`.
+- Added project configuration discovery through the nearest `subconscious.toml` file.
+- Added explicit `send_whisper` and capability-gated `queue_message` delivery tools.
+- Removed automatic relay of observer assistant text and the `PreToolUse` polling hook.
+- Added durable event deduplication, conversation routes, delivery acknowledgements, and ambiguous-send reconciliation state.
+- Added OTID lookup and explicit retry or discard controls for interrupted observer turns.
+
 ### Fixed
 
 - **Deprecated `llm_config` PATCH shape** — `updateAgentModel()` was sending `{ llm_config: {...} }` as the agent PATCH body. Letta now rejects that with HTTP 400 ("The `llm_config` field is deprecated and no longer accepted. Use the `model` field instead."). The session-start model/context-window sync therefore failed silently on every Claude Code launch, leaving `LETTA_MODEL` / `LETTA_CONTEXT_WINDOW` env overrides un-applied — agents stayed pinned to whatever they last had server-side. Switched to the new top-level `model` + `context_window_limit` shape.

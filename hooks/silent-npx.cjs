@@ -24,13 +24,13 @@ if (args[0] === 'tsx') {
   let scriptArgs = args.slice(1); // everything after 'tsx'
   const pluginRoot = path.resolve(__dirname, '..');
 
-  // Fix for #34: If CLAUDE_PLUGIN_ROOT was empty, script paths resolve to
-  // absolute paths like "/scripts/foo.ts" which don't exist. Re-resolve
-  // them relative to the plugin root (which we know from __dirname).
+  // If CLAUDE_PLUGIN_ROOT is empty, an absolute-looking plugin path does not
+  // exist. Resolve the requested file from the plugin root.
   scriptArgs = scriptArgs.map(arg => {
-    if (!fs.existsSync(arg) && arg.includes('/scripts/')) {
-      const basename = path.basename(arg);
-      const resolved = path.join(pluginRoot, 'scripts', basename);
+    if (!fs.existsSync(arg) && (arg.includes('/scripts/') || arg.includes('/packages/'))) {
+      const marker = arg.includes('/packages/') ? '/packages/' : '/scripts/';
+      const relative = arg.slice(arg.indexOf(marker) + 1);
+      const resolved = path.join(pluginRoot, relative);
       if (fs.existsSync(resolved)) return resolved;
     }
     return arg;
