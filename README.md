@@ -105,6 +105,8 @@ mid_turn_min_seconds = 90
 
 `mid_turn_min_tool_calls` is how many tool calls one observation must cover before it runs. `mid_turn_min_seconds` is the quiet period after the observer's previous turn on that session. Both must pass. Raise either one to spend fewer observer turns on a busy session.
 
+`npm run check` runs the fast suite. `npm run test:e2e` is separate: it starts a real Claude Code process with the hook registered, and checks that a whisper waiting in the broker is read back by the model. It needs the `claude` binary and a logged-in session, and takes about ten seconds per case.
+
 Two configurations can use one observer agent. Those projects share the agent's memory. Use separate agent IDs for project memory isolation.
 
 ## Install an adapter

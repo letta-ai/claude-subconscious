@@ -366,6 +366,8 @@ Delivering on the tool events lets a whisper reach a turn already in progress in
 
 The hook skips a `PostToolUse` event when the project has not enabled `observer.mid_turn`. The broker refuses the event anyway, so this is not the check that enforces the flag; it keeps a project without the flag from paying a local round trip on every tool call to be told no.
 
+Passive delivery is proven against the binary rather than against a description of it. `npm run test:e2e` places a whisper in a broker, runs a real `claude` process with the Subconscious hook registered on one boundary, and asserts the model reads the whisper back. The transcript names the boundary that carried it, which is what a wrong channel or a mismatched event name gets wrong. The hook under test reaches a broker of its own, so an installed plugin on the same machine cannot deliver the whisper first and hide the result.
+
 Claude Code has no proven external queue API. `queue_message` stays unavailable until a live test proves one.
 
 ### Codex
@@ -520,7 +522,10 @@ The CLI provides the following commands:
 - [ ] A live turn proves that a queued message reaches a running Letta Code conversation.
 - [x] The session status reaches the harness once per route and reports the agent, model, and delivery channels.
 - [x] A second status claim on the same route returns nothing.
-- [x] A whisper reaches Claude Code through the real hook, on the channel each boundary reads, in end-to-end tests that assert on the emitted bytes.
+- [x] A real `claude` process reads a whisper back verbatim, at a prompt boundary and at a tool boundary, and the session transcript names the boundary that carried it.
+- [x] A whisper whose only registered boundary is one Claude Code discards stays pending, proven against a real `claude` process.
+- [x] The end-to-end suite isolates itself from an installed Subconscious, so a developer's own plugin cannot deliver the whisper under test.
+- [x] A whisper reaches Claude Code through the real hook, on the channel each boundary reads, in tests that assert on the emitted bytes.
 - [x] The envelope names the boundary that carried it, on both tool events.
 - [x] A status and a whisper that land on the same boundary are emitted as one object.
 - [x] A whisper an event cannot carry stays pending for a boundary that can.
@@ -547,7 +552,7 @@ The CLI provides the following commands:
 - [x] A `tool_result` event carries route and tool identity only, never the tool input or the tool output.
 - [x] Adapters observe `PostToolUse` and not `PreToolUse`, and a mid-turn observation advances the same transcript cursor as the completed turn.
 - [x] Two tool calls in one turn produce two event IDs even when the transcript marker has not moved.
-- [ ] A live session proves that a mid-turn whisper reaches the coding agent at a tool boundary inside the turn.
+- [x] A live session proves that a mid-turn whisper reaches the coding agent at a tool boundary inside the turn.
 
 ### Product validation
 
@@ -560,6 +565,7 @@ The CLI provides the following commands:
 - [x] Tests prove that shared-agent turns serialize against one MemFS repository.
 - [x] A live acceptance test uses `letta/auto` and verifies the exact conversation route.
 - [x] The repository's full check command validates specs, types, formatting, tests, and package contents.
+- [x] The end-to-end suite runs from its own command, and fails rather than skips when the `claude` binary or the build is missing.
 
 ## Non-goals
 

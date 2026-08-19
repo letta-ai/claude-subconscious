@@ -1,38 +1,40 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
-import type {
-  RunObservationInput,
-  RunObservationResult,
-} from "../packages/agent-runtime/index.js";
+import type { RunObservationResult } from "../packages/agent-runtime/index.js";
 import { SubconsciousBroker } from "../packages/cli/broker.js";
 import { brokerBuild, runHook } from "../packages/cli/hook.js";
 import {
   deliveryId,
+  routeKey,
   sendBrokerRequest,
   writeBrokerDescriptor,
   writeProjectConfig,
   type BrokerDescriptor,
+  type BrokerState,
   type DeliveryRecord,
 } from "../packages/core/index.js";
 
 /**
- * End-to-end whisper delivery into Claude Code.
+ * What the broker and the hook do with a whisper that is waiting to be sent.
  *
- * Every other test in this repository stops at a seam: the adapter formats a
- * whisper, the broker leases it, `formatHookOutput` shapes it. None of them
- * proves that a whisper a real observer turn produced comes out of a real hook
- * process in the shape Claude Code reads, and that is the failure this system
- * cannot detect at runtime. Claude Code drops output it cannot parse and says
- * nothing about it, while the broker has already handed the delivery over. A
- * wrong channel, a wrong event name, or an emission the harness discards spends
- * the whisper and leaves no trace anywhere.
+ * These are the decisions made on this side of the harness: which boundary a
+ * whisper may go out on, what shape it takes there, when it is acknowledged,
+ * and which session it belongs to. `runHook` runs for real against a live
+ * broker over a real socket, and the assertions are the bytes that would reach
+ * the harness.
  *
- * So these tests run `runHook` itself against a live broker over a real socket,
- * and assert on the bytes the harness would receive.
+ * Two things are deliberately absent, and neither is stubbed in as a stand-in.
+ * The observer is not here: a whisper is placed in the broker's state exactly
+ * as a completed observer turn would leave it, so nothing below depends on a
+ * fake agent deciding to speak. Claude Code is not here either, so these tests
+ * cannot show that the harness accepts what is emitted. `tests/e2e` runs a real
+ * `claude` process and asserts on what the model reads back; that is the file
+ * that proves whispering works. This one covers the paths a live run is too
+ * slow and too coarse to reach, such as a hook that dies mid-write.
  */
 
 const roots: string[] = [];
@@ -54,21 +56,28 @@ async function root(prefix: string): Promise<string> {
   return await realpath(value);
 }
 
-async function waitFor(
-  predicate: () => Promise<boolean>,
-  timeoutMs = 2_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("Timed out waiting for broker state.");
-}
+/**
+ * An observer that never sends anything.
+ *
+ * The hook observes the events it delivers on, so a broker in these tests will
+ * start turns. This one completes without producing a delivery, which keeps
+ * every whisper below the one the test placed itself.
+ */
+const silentObserver = {
+  run: async (): Promise<RunObservationResult> => ({
+    status: "success",
+    conversationId: "conv-observer",
+    result: {
+      type: "result",
+      success: true,
+      durationMs: 1,
+      conversationId: "conv-observer",
+      runIds: ["run-observer"],
+    },
+  }),
+};
 
 interface Session {
-  /** The project the harness reports as its working directory. */
-  directory: string;
   /**
    * Run the real hook against one Claude Code payload, and capture stdout.
    *
@@ -80,24 +89,27 @@ interface Session {
     payload: Record<string, unknown>,
     breakStdout?: boolean,
   ): Promise<string>;
-  /** Produce one pending whisper through an observer turn. */
-  whisper(text: string): Promise<void>;
   /** Take the session status banner, so a later assertion sees whispers only. */
   takeStatus(): Promise<void>;
   deliveries(): Promise<DeliveryRecord[]>;
+  whisper: string;
 }
 
 /**
- * A configured project, a live broker, and a hook that will talk to it.
+ * A configured project holding one pending whisper, and a broker serving it.
  *
- * The broker's descriptor carries the build identity `brokerBuild` reports.
- * Without it the hook treats this broker as a stale daemon from another build,
- * shuts it down, and spawns a real one, which would leave the test passing
- * against a process it never meant to start.
+ * The state file is written before the broker starts, which is how a real
+ * broker finds the deliveries an earlier turn produced.
+ *
+ * The descriptor carries the build identity `brokerBuild` reports. Without it
+ * the hook treats this broker as a stale daemon from another build, shuts it
+ * down, and spawns a real one, which would leave the test passing against a
+ * process it never meant to start.
  */
-async function session(): Promise<Session> {
+async function session(whisper: string): Promise<Session> {
   const directory = await root("whisper");
   const home = await root("home");
+  const sessionId = "session-whisper";
   await writeProjectConfig(directory, {
     version: 1,
     agentId: "agent-whisper",
@@ -106,37 +118,50 @@ async function session(): Promise<Session> {
     observer: {},
   });
 
-  let nextWhisper: string | null = null;
-  const runtime = {
-    run: async (input: RunObservationInput): Promise<RunObservationResult> => {
-      if (nextWhisper) {
-        await input.persistDelivery({
-          id: deliveryId(input.event.id, "whisper", nextWhisper),
-          routeKey: input.route.key,
-          observationId: input.event.id,
-          kind: "whisper",
-          text: nextWhisper,
-          priority: "normal",
-          dedupeKey: nextWhisper,
-          status: "pending",
-          createdAt: new Date().toISOString(),
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          attempts: 0,
-        });
-      }
-      return {
-        status: "success",
-        conversationId: "conv-observer",
-        result: {
-          type: "result",
-          success: true,
-          durationMs: 1,
-          conversationId: "conv-observer",
-          runIds: ["run-observer"],
-        },
-      };
+  const identity = {
+    configPath: join(directory, "subconscious.toml"),
+    projectRoot: directory,
+    agentId: "agent-whisper",
+    model: "letta/auto",
+    harness: "claude-code" as const,
+    sessionId,
+  };
+  const key = routeKey(identity);
+  const id = deliveryId("seed", "whisper", "seed");
+  const now = new Date().toISOString();
+  const state: BrokerState = {
+    version: 1,
+    routes: {
+      [key]: {
+        key,
+        ...identity,
+        conversationId: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+    },
+    observations: {},
+    observationOrder: [],
+    deliveries: {
+      [id]: {
+        id,
+        routeKey: key,
+        observationId: "seed",
+        kind: "whisper",
+        text: whisper,
+        priority: "normal",
+        dedupeKey: "seed",
+        status: "pending",
+        createdAt: now,
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        attempts: 0,
+      },
     },
   };
+  await writeFile(
+    join(home, "state.json"),
+    `${JSON.stringify(state, null, 2)}\n`,
+  );
 
   const descriptor: BrokerDescriptor = {
     version: 1,
@@ -146,25 +171,18 @@ async function session(): Promise<Session> {
         : join(home, "broker.sock"),
     token: "test-token",
     pid: process.pid,
-    startedAt: new Date().toISOString(),
+    startedAt: now,
     build: await brokerBuild(),
   };
   const broker = new SubconsciousBroker({
     descriptor,
     stateDirectory: home,
-    runtime,
+    runtime: silentObserver,
   });
   brokers.push(broker);
   await broker.start();
   process.env.SUBCONSCIOUS_HOME = home;
   await writeBrokerDescriptor(join(home, "broker.json"), descriptor);
-
-  const sessionId = "session-whisper";
-  const target = {
-    harness: "claude-code" as const,
-    sessionId,
-    workingDirectory: directory,
-  };
 
   async function deliveries(): Promise<DeliveryRecord[]> {
     const response = await sendBrokerRequest(descriptor, { type: "status" });
@@ -174,7 +192,7 @@ async function session(): Promise<Session> {
   }
 
   return {
-    directory,
+    whisper,
     async hook(payload, breakStdout = false) {
       const input = JSON.stringify({
         session_id: sessionId,
@@ -199,32 +217,14 @@ async function session(): Promise<Session> {
       }
       return written.join("");
     },
-    async whisper(text) {
-      nextWhisper = text;
-      const id = `observation-${randomUUID()}`;
-      await sendBrokerRequest(descriptor, {
-        type: "observe",
-        event: {
-          id,
-          harness: "claude-code",
-          type: "session_start",
-          sessionId,
-          workingDirectory: directory,
-          occurredAt: new Date().toISOString(),
-          payload: {},
-        },
-      });
-      await waitFor(async () =>
-        (await deliveries()).some(
-          (delivery) => delivery.text === text && delivery.status === "pending",
-        ),
-      );
-      nextWhisper = null;
-    },
     async takeStatus() {
       await sendBrokerRequest(descriptor, {
         type: "claim_session_status",
-        target,
+        target: {
+          harness: "claude-code",
+          sessionId,
+          workingDirectory: directory,
+        },
       });
     },
     deliveries,
@@ -232,8 +232,8 @@ async function session(): Promise<Session> {
 }
 
 function envelope(output: string): Record<string, unknown> {
-  // Claude Code parses tool-boundary output as JSON and silently drops anything
-  // it cannot read, so the parse itself is the assertion.
+  // Claude Code parses tool-boundary output as JSON and drops anything it
+  // cannot read, so the parse itself is the assertion.
   const parsed = JSON.parse(output.trim()) as {
     hookSpecificOutput?: Record<string, unknown>;
   };
@@ -242,10 +242,9 @@ function envelope(output: string): Record<string, unknown> {
   return inner;
 }
 
-describe("whispering into Claude Code", () => {
-  it("delivers a pending whisper as plain text at a prompt boundary", async () => {
-    const active = await session();
-    await active.whisper("The migration runs before the deploy.");
+describe("a whisper waiting in the broker", () => {
+  it("goes out as plain text at a prompt boundary", async () => {
+    const active = await session("The migration runs before the deploy.");
     await active.takeStatus();
 
     const output = await active.hook({
@@ -254,15 +253,16 @@ describe("whispering into Claude Code", () => {
     });
 
     expect(output).toContain("<subconscious_whisper");
-    expect(output).toContain("The migration runs before the deploy.");
+    expect(output).toContain(active.whisper);
     // A prompt boundary reads raw stdout. An envelope here would be injected as
     // literal JSON text for the model to read.
     expect(() => JSON.parse(output.trim())).toThrow();
   });
 
-  it("delivers a pending whisper inside the envelope a tool boundary requires", async () => {
-    const active = await session();
-    await active.whisper("That approach already failed on this branch.");
+  it("goes out inside the envelope a tool boundary requires", async () => {
+    const active = await session(
+      "That approach already failed on this branch.",
+    );
     await active.takeStatus();
 
     const output = await active.hook({
@@ -274,17 +274,14 @@ describe("whispering into Claude Code", () => {
 
     const inner = envelope(output);
     expect(inner.hookEventName).toBe("PostToolUse");
-    expect(String(inner.additionalContext)).toContain(
-      "That approach already failed on this branch.",
-    );
+    expect(String(inner.additionalContext)).toContain(active.whisper);
   });
 
   it("names the boundary that carried it, on both tool events", async () => {
     // Claude Code matches the envelope's event name against the hook that
     // produced it and drops a mismatch without a word, which spends the whisper.
     for (const event of ["PreToolUse", "PostToolUse"]) {
-      const active = await session();
-      await active.whisper(`Whisper at ${event}.`);
+      const active = await session(`Whisper at ${event}.`);
       await active.takeStatus();
       const output = await active.hook({
         hook_event_name: event,
@@ -295,12 +292,11 @@ describe("whispering into Claude Code", () => {
     }
   });
 
-  it("carries the session status and a whisper in one emission", async () => {
+  it("shares one emission with the session status", async () => {
     // The envelope holds one object per event, so a status and a whisper that
     // land on the same boundary have to be emitted together. Writing twice
     // would give the harness two JSON documents and it would keep neither.
-    const active = await session();
-    await active.whisper("Check the deployment order.");
+    const active = await session("Check the deployment order.");
 
     const output = await active.hook({
       hook_event_name: "PostToolUse",
@@ -311,12 +307,11 @@ describe("whispering into Claude Code", () => {
     const context = String(envelope(output).additionalContext);
     expect(context).toContain("<subconscious_status>");
     expect(context).toContain("agent-whisper");
-    expect(context).toContain("Check the deployment order.");
+    expect(context).toContain(active.whisper);
   });
 
-  it("sends one whisper once", async () => {
-    const active = await session();
-    await active.whisper("Say this exactly once.");
+  it("goes out once", async () => {
+    const active = await session("Say this exactly once.");
     await active.takeStatus();
 
     const first = await active.hook({
@@ -328,18 +323,17 @@ describe("whispering into Claude Code", () => {
       prompt: "Go again.",
     });
 
-    expect(first).toContain("Say this exactly once.");
+    expect(first).toContain(active.whisper);
     expect(second).toBe("");
     expect(
       (await active.deliveries()).map((delivery) => delivery.status),
     ).toEqual(["delivered"]);
   });
 
-  it("holds a whisper until a boundary that can carry it", async () => {
+  it("waits for a boundary that can carry it", async () => {
     // Claude Code discards Stop output. A lease there would acknowledge a
     // whisper the model never sees, so the adapter claims no channel for it.
-    const active = await session();
-    await active.whisper("Wait for a boundary that reads context.");
+    const active = await session("Wait for a boundary that reads context.");
     await active.takeStatus();
 
     expect(await active.hook({ hook_event_name: "Stop" })).toBe("");
@@ -355,15 +349,14 @@ describe("whispering into Claude Code", () => {
         hook_event_name: "UserPromptSubmit",
         prompt: "Continue.",
       }),
-    ).toContain("Wait for a boundary that reads context.");
+    ).toContain(active.whisper);
   });
 
-  it("keeps a whisper pending when the harness never receives it", async () => {
+  it("stays pending when the harness never receives it", async () => {
     // The acknowledgement follows the emission. A hook that dies while writing
     // has to leave the whisper pending, because the alternative is a delivery
     // marked delivered that no model ever read.
-    const active = await session();
-    await active.whisper("Survive a broken pipe.");
+    const active = await session("Survive a broken pipe.");
     await active.takeStatus();
 
     await expect(
@@ -379,12 +372,11 @@ describe("whispering into Claude Code", () => {
         hook_event_name: "UserPromptSubmit",
         prompt: "Retry.",
       }),
-    ).toContain("Survive a broken pipe.");
+    ).toContain(active.whisper);
   });
 
-  it("says nothing in a directory no project configures", async () => {
-    const active = await session();
-    await active.whisper("Never leaves the configured project.");
+  it("never leaves a directory no project configures", async () => {
+    const active = await session("Never leaves the configured project.");
     await active.takeStatus();
     const elsewhere = await root("unconfigured");
 
@@ -402,11 +394,10 @@ describe("whispering into Claude Code", () => {
     ).toBe(true);
   });
 
-  it("sends a whisper only to the session that earned it", async () => {
+  it("reaches only the session that earned it", async () => {
     // Deliveries are routed, not broadcast. A second Claude Code session in the
     // same project must not receive another session's context.
-    const active = await session();
-    await active.whisper("Only for the first session.");
+    const active = await session("Only for the first session.");
     await active.takeStatus();
 
     expect(
