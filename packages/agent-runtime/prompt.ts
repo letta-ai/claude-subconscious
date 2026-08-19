@@ -64,7 +64,11 @@ export function formatObservationPrompt(
   const priming = event.type === "session_start";
   return [
     `Subconscious observation for ${event.harness} session ${event.sessionId}.`,
-    `Project root: ${projectRoot}`,
+    // The sandbox carries MemFS but not the project checkout, so the observer
+    // has to know that a project path it sees in the observation is unreadable.
+    config.observer.sandbox
+      ? `Project root: ${projectRoot}. Your tools run in a managed sandbox that does not mount it, so MemFS and this observation are the only readable sources.`
+      : `Project root: ${projectRoot}`,
     `Available delivery tools: ${deliveryTools.length > 0 ? deliveryTools.join(", ") : "none"}.`,
     instructions ? `Project observer instructions:\n${instructions}` : null,
     `<harness_observation event_id="${event.id}" type="${event.type}">\n${observation}\n</harness_observation>`,

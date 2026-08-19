@@ -1,5 +1,6 @@
 import {
   LettaAgentClient,
+  type LettaCodeCloudSandboxOptions,
   type SDKResultMessage,
 } from "@letta-ai/letta-agent-sdk";
 import type {
@@ -21,9 +22,32 @@ const OBSERVER_TOOLS = [
   "memory_apply_patch",
 ] as const;
 
+/**
+ * Managed-sandbox settings for projects that move observer tools off this
+ * machine.
+ *
+ * Every observation opens and closes a session on the same resumed
+ * conversation, so terminating the sandbox on close would pay a cold start per
+ * turn. The refresh interval stays below the TTL so an idle turn cannot expire
+ * the sandbox mid-session.
+ */
+const SANDBOX_OPTIONS: LettaCodeCloudSandboxOptions = {
+  ttlMinutes: 5,
+  readyTimeoutMs: 120_000,
+  readyPollIntervalMs: 1_000,
+  refreshIntervalMs: 240_000,
+  terminateOnClose: false,
+};
+
 export interface AgentRuntimeOptions {
   apiKey: string;
   client?: LettaAgentClient;
+  /**
+   * Client for projects that enable the managed sandbox. It defaults to a Cloud
+   * client that owns the sandbox, and is constructed only when such a project
+   * runs, so local projects never open a Cloud session.
+   */
+  sandboxClient?: LettaAgentClient;
 }
 
 export interface RunObservationInput {
@@ -67,6 +91,7 @@ function resultError(result: SDKResultMessage): string {
 export class AgentRuntime {
   private readonly client: LettaAgentClient;
   private readonly apiKey: string;
+  private sandboxClient: LettaAgentClient | null;
 
   constructor(options: AgentRuntimeOptions) {
     this.apiKey = options.apiKey;
@@ -76,6 +101,24 @@ export class AgentRuntime {
         backend: "local",
         appServer: { harnessBackend: "api", pinGlobalAgent: false },
       });
+    this.sandboxClient = options.sandboxClient ?? null;
+  }
+
+  /**
+   * The client that runs one observation.
+   *
+   * The Cloud client owns the managed sandbox, so a sandboxed project must use
+   * it for the session and for the tool inventory that follows the turn.
+   * Otherwise the local App Server client keeps running tools on this machine.
+   */
+  private clientFor(config: ProjectConfig): LettaAgentClient {
+    if (!config.observer.sandbox) return this.client;
+    this.sandboxClient ??= new LettaAgentClient({
+      backend: "cloud",
+      apiKey: this.apiKey,
+      sandbox: SANDBOX_OPTIONS,
+    });
+    return this.sandboxClient;
   }
 
   async findConversationByOtid(
@@ -163,14 +206,25 @@ export class AgentRuntime {
             message: `Tool ${toolName} is not in the Subconscious client allowlist.`,
             interrupt: false,
           };
+    const client = this.clientFor(input.config);
+    const sandboxed = input.config.observer.sandbox === true;
     const sessionOptions = {
       model: input.config.model,
       allowedTools,
       toolset: { base: "none" as const, include: [...OBSERVER_TOOLS] },
       permissionMode: "standard" as const,
       canUseTool,
-      cwd: input.route.projectRoot,
-      env: { LETTA_API_KEY: this.apiKey },
+      /**
+       * A managed sandbox does not mount the project, so the project root names
+       * a path that does not exist there, and cloud transports ignore session
+       * env. The Cloud client carries the credential for those sessions.
+       */
+      ...(sandboxed
+        ? {}
+        : {
+            cwd: input.route.projectRoot,
+            env: { LETTA_API_KEY: this.apiKey },
+          }),
       skillSources: [],
       dreaming: { trigger: "off" as const },
       tools: deliveryTools,
@@ -180,8 +234,8 @@ export class AgentRuntime {
     let sendMayHaveStarted = false;
     try {
       session = input.route.conversationId
-        ? this.client.resumeSession(input.route.conversationId, sessionOptions)
-        : this.client.createSession(input.route.agentId, sessionOptions);
+        ? client.resumeSession(input.route.conversationId, sessionOptions)
+        : client.createSession(input.route.agentId, sessionOptions);
       const initialized = await session.bootstrapState({ limit: 1 });
       const message = formatObservationPrompt(
         input.event,
@@ -219,7 +273,7 @@ export class AgentRuntime {
           error: "The observer turn succeeded without a conversation ID.",
         };
       }
-      const attachedServerTools = await this.client.agents
+      const attachedServerTools = await client.agents
         .retrieve(input.route.agentId)
         .then((agent) =>
           agent.tools?.flatMap((tool) => (tool.name ? [tool.name] : [])),

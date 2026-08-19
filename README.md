@@ -92,6 +92,8 @@ instructions = "Focus on regressions and forgotten project decisions."
 
 Subconscious walks from the harness working directory toward the filesystem root. The nearest `subconscious.toml` file wins. A directory without this file stays unobserved.
 
+Add `sandbox = true` under `[observer]` to run the observer's tools in a Letta managed sandbox instead of on this machine. The sandbox does not mount the project, so the observer keeps its MemFS and can no longer read project files. Leave the key out for local tools and full project access.
+
 Two configurations can use one observer agent. Those projects share the agent's memory. Use separate agent IDs for project memory isolation.
 
 ## Install an adapter

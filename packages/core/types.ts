@@ -28,6 +28,14 @@ export interface DeliveryConfig {
 
 export interface ObserverConfig {
   instructions?: string;
+  /**
+   * Run the observer's tools in a Letta managed sandbox instead of on this
+   * machine.
+   *
+   * A managed sandbox does not mount the project, so the observer keeps its
+   * MemFS and loses every project file. An absent key means local execution.
+   */
+  sandbox?: boolean;
 }
 
 export interface ProjectConfig {

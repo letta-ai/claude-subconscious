@@ -60,6 +60,7 @@ export function validateProjectConfig(raw: unknown): ProjectConfig {
       ...(readOptionalString(observerRaw, "instructions")
         ? { instructions: readOptionalString(observerRaw, "instructions") }
         : {}),
+      ...(readBoolean(observerRaw, "sandbox", false) ? { sandbox: true } : {}),
     },
   };
 }
@@ -136,13 +137,13 @@ export function formatProjectConfig(config: ProjectConfig): string {
     `whispers = ${config.delivery.whispers}`,
     `queue_messages = ${config.delivery.queueMessages}`,
   ];
-  if (config.observer.instructions) {
-    lines.push(
-      "",
-      "[observer]",
-      `instructions = ${tomlString(config.observer.instructions)}`,
-    );
-  }
+  const observer = [
+    ...(config.observer.instructions
+      ? [`instructions = ${tomlString(config.observer.instructions)}`]
+      : []),
+    ...(config.observer.sandbox ? ["sandbox = true"] : []),
+  ];
+  if (observer.length > 0) lines.push("", "[observer]", ...observer);
   return `${lines.join("\n")}\n`;
 }
 

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -67,6 +67,56 @@ describe("project configuration", () => {
       delivery: { whispers: true, queueMessages: false },
       observer: {},
     });
+  });
+
+  it("keeps the managed sandbox off unless a project asks for it", () => {
+    expect(
+      validateProjectConfig({ version: 1, agent_id: "agent-test" }).observer,
+    ).toEqual({});
+    expect(
+      validateProjectConfig({
+        version: 1,
+        agent_id: "agent-test",
+        observer: { sandbox: false },
+      }).observer,
+    ).toEqual({});
+    expect(
+      validateProjectConfig({
+        version: 1,
+        agent_id: "agent-test",
+        observer: { sandbox: true, instructions: "Watch the build." },
+      }).observer,
+    ).toEqual({ sandbox: true, instructions: "Watch the build." });
+    expect(() =>
+      validateProjectConfig({
+        version: 1,
+        agent_id: "agent-test",
+        observer: { sandbox: "yes" },
+      }),
+    ).toThrow("sandbox must be a boolean.");
+  });
+
+  it("writes the sandbox flag only when it is on", async () => {
+    const directory = await root();
+    const enabled = await writeProjectConfig(join(directory, "sandboxed"), {
+      version: 1,
+      agentId: "agent-test",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages: false },
+      observer: { sandbox: true },
+    });
+    expect(await loadProjectConfig(enabled)).toMatchObject({
+      observer: { sandbox: true },
+    });
+
+    const local = await writeProjectConfig(join(directory, "local"), {
+      version: 1,
+      agentId: "agent-test",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages: false },
+      observer: {},
+    });
+    expect(await readFile(local, "utf8")).not.toContain("sandbox");
   });
 
   it("round-trips a written configuration", async () => {

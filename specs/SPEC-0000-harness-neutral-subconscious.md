@@ -82,7 +82,16 @@ queue_messages = false
 
 [observer]
 instructions = "Focus on regressions and forgotten project decisions."
+sandbox = false
 ```
+
+`observer.sandbox` chooses where the observer's tools run. It is off by default, and an absent key means the tools run in the broker process against the project root, which is the only behavior earlier versions had.
+
+When it is on, the runtime opens the session through a Cloud client that owns a Letta managed sandbox. Nothing the observer runs touches the user's machine. The cost is the project: a managed sandbox does not mount local paths, so the read tools reach the agent's MemFS projection and nothing else. The observer then works from MemFS and the observation text alone, and the observation prompt says so rather than letting it guess why a project path is missing.
+
+The bundled toolset does not change. MemFS is a filesystem projection that travels with the agent, so `Read`, `LS`, `Glob`, and `Grep` are how the observer retrieves memory wherever it runs. Removing them would leave an observer that can write memory and never read it. The delivery tools execute in the broker process over the external-tool protocol, so they behave the same on both transports.
+
+A sandboxed session sends no `cwd` and no session `env`. The project root does not exist in the sandbox, cloud transports ignore session env, and the Cloud client carries the credential instead.
 
 The CLI can create a dedicated observer agent when `agent_id` is absent. Agent creation uses `model: "letta/auto"`, MemFS, and `baseTools: []`. It does not supply legacy memory block inputs or attach server-side tools.
 
@@ -145,9 +154,25 @@ The local App Server runs the built-in read tools in the configured project root
 
 Each runtime session receives the selected Cloud credential through its `env`. The runtime does not choose a different server from an ambient `LETTA_BASE_URL`.
 
+A project that sets `observer.sandbox` replaces the runtime client with a Cloud client that owns a managed sandbox:
+
+```ts
+const sandboxRuntime = new LettaAgentClient({
+  backend: "cloud",
+  apiKey,
+  sandbox: {
+    ttlMinutes: 5,
+    refreshIntervalMs: 240_000,
+    terminateOnClose: false,
+  },
+});
+```
+
+The runtime builds that client on the first sandboxed observation, so a project that never asks for a sandbox never opens a Cloud session. The sandbox outlives one session because each observation opens and closes a session on the same resumed conversation, and terminating on close would pay a cold start every turn. The tool inventory read after the turn uses the same client as the turn.
+
 Each session uses the following rules:
 
-- Set `cwd` to the resolved project root.
+- Set `cwd` to the resolved project root. A sandboxed session sends no `cwd` and no `env`.
 - Set the model to the project model. The default is `letta/auto`.
 - Disable skill loading with `skillSources: []`.
 - Disable automatic dreaming with `dreaming: { trigger: "off" }`.
@@ -376,6 +401,11 @@ The CLI provides the following commands:
 - [x] The client tool allowlist excludes shell, project mutation, delegation, interactive, and worktree tools.
 - [x] The permission callback denies every client tool outside the allowlist.
 - [x] The CLI reports attached server-side agent tools separately from the client tool allowlist.
+- [x] Tool execution stays local unless `observer.sandbox` is true. An absent key runs exactly as it did before the flag existed.
+- [x] A sandboxed project opens its session through the Cloud sandbox client and sends neither `cwd` nor session `env`.
+- [x] A sandboxed session keeps the MemFS read tools and the broker-process delivery tools.
+- [x] The observation prompt tells a sandboxed observer that the project root is not readable.
+- [ ] A live turn proves that a sandboxed observer reads MemFS and delivers a whisper from the broker process.
 
 ### Delivery
 

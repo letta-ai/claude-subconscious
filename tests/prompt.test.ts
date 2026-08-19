@@ -82,6 +82,46 @@ describe("observer context-management prompt", () => {
     );
   });
 
+  it("tells a sandboxed observer that the project is unreadable", () => {
+    const event: HarnessEvent = {
+      id: "event-1",
+      harness: "claude-code",
+      type: "user_prompt",
+      sessionId: "session-1",
+      workingDirectory: "/project",
+      occurredAt: "2026-08-18T00:00:00.000Z",
+      payload: {},
+    };
+    const config: ProjectConfig = {
+      version: 1,
+      agentId: "agent-observer",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages: false },
+      observer: {},
+    };
+
+    expect(
+      formatObservationPrompt(
+        event,
+        config,
+        "Observed.",
+        ["send_whisper"],
+        "/project",
+      ),
+    ).not.toContain("managed sandbox");
+    expect(
+      formatObservationPrompt(
+        event,
+        { ...config, observer: { sandbox: true } },
+        "Observed.",
+        ["send_whisper"],
+        "/project",
+      ),
+    ).toContain(
+      "Your tools run in a managed sandbox that does not mount it, so MemFS and this observation are the only readable sources.",
+    );
+  });
+
   it("primes a starting session with a cheatsheet instead of the usual bar", () => {
     const config: ProjectConfig = {
       version: 1,

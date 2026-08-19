@@ -4,7 +4,7 @@ import type {
 } from "@letta-ai/letta-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
 import { AgentRuntime } from "../packages/agent-runtime/index.js";
-import type { RouteRecord } from "../packages/core/index.js";
+import type { ProjectConfig, RouteRecord } from "../packages/core/index.js";
 
 function route(conversationId: string | null = null): RouteRecord {
   return {
@@ -18,6 +18,81 @@ function route(conversationId: string | null = null): RouteRecord {
     conversationId,
     createdAt: "now",
     updatedAt: "now",
+  };
+}
+
+function observerSession() {
+  return {
+    send: vi.fn(async () => {}),
+    close: vi.fn(),
+    conversationId: "conv-observer",
+    bootstrapState: vi.fn(async () => ({
+      agentId: "agent-observer",
+      model: "letta/auto",
+      conversationId: "conv-observer",
+      messages: [],
+    })),
+    async *stream() {
+      yield {
+        type: "result",
+        success: true,
+        durationMs: 1,
+        conversationId: "conv-observer",
+        runIds: ["run-one"],
+      };
+    },
+  };
+}
+
+/**
+ * A client that records the options of the session it was asked to open, so a
+ * test can prove which client ran the turn and what it sent.
+ */
+function recordingClient(session: ReturnType<typeof observerSession>) {
+  const captured: { options?: LettaCodeClientSessionOptions } = {};
+  const client = {
+    createSession: vi.fn(
+      (_agentId: string, options: LettaCodeClientSessionOptions) => {
+        captured.options = options;
+        return session;
+      },
+    ),
+    resumeSession: vi.fn(),
+    agents: { retrieve: vi.fn(async () => ({ tools: [] })) },
+  };
+  return { client, captured };
+}
+
+function observation(config: ProjectConfig) {
+  return {
+    event: {
+      id: "event",
+      harness: "claude-code" as const,
+      type: "turn_stop" as const,
+      sessionId: "session",
+      workingDirectory: "/project",
+      occurredAt: "now",
+      payload: {},
+    },
+    route: route(),
+    config,
+    prepared: { text: "Observed turn." },
+    capabilities: {
+      passiveContext: true,
+      queuedMessage: false,
+      transcript: "file" as const,
+    },
+    persistDelivery: async () => {},
+  };
+}
+
+function projectConfig(sandbox: boolean): ProjectConfig {
+  return {
+    version: 1,
+    agentId: "agent-observer",
+    model: "letta/auto",
+    delivery: { whispers: true, queueMessages: false },
+    observer: sandbox ? { sandbox: true } : {},
   };
 }
 
@@ -271,6 +346,60 @@ describe("Agent SDK runtime", () => {
       conversationId: null,
       error: "invalid conversation setup",
     });
+  });
+
+  it("runs tools on this machine when no project asks for a sandbox", async () => {
+    const local = recordingClient(observerSession());
+    const sandbox = recordingClient(observerSession());
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+      sandboxClient: sandbox.client as unknown as LettaAgentClient,
+    });
+
+    const result = await runtime.run(observation(projectConfig(false)));
+
+    expect(result.status).toBe("success");
+    expect(sandbox.client.createSession).not.toHaveBeenCalled();
+    expect(local.captured.options?.cwd).toBe("/project");
+    expect(local.captured.options?.env).toEqual({ LETTA_API_KEY: "test-key" });
+  });
+
+  it("moves a sandboxed project onto the Cloud client without the project root", async () => {
+    const local = recordingClient(observerSession());
+    const sandbox = recordingClient(observerSession());
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+      sandboxClient: sandbox.client as unknown as LettaAgentClient,
+    });
+
+    const result = await runtime.run(observation(projectConfig(true)));
+
+    expect(result.status).toBe("success");
+    expect(local.client.createSession).not.toHaveBeenCalled();
+    expect(sandbox.client.createSession).toHaveBeenCalledOnce();
+    // The sandbox has no project checkout and cloud transports ignore session
+    // env, so neither belongs on the session.
+    expect(sandbox.captured.options?.cwd).toBeUndefined();
+    expect(sandbox.captured.options?.env).toBeUndefined();
+    // MemFS travels with the agent, so the read tools still have something to
+    // read, and the delivery tools still execute in the broker process.
+    expect(sandbox.captured.options?.allowedTools).toEqual([
+      "Read",
+      "LS",
+      "Glob",
+      "Grep",
+      "memory_apply_patch",
+      "send_whisper",
+    ]);
+    expect(sandbox.captured.options?.tools?.map((tool) => tool.name)).toEqual([
+      "send_whisper",
+    ]);
+    expect(sandbox.client.agents.retrieve).toHaveBeenCalledWith(
+      "agent-observer",
+    );
+    expect(local.client.agents.retrieve).not.toHaveBeenCalled();
   });
 
   it("finds an interrupted OTID through Agent SDK conversation history", async () => {
