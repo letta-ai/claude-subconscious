@@ -63,5 +63,55 @@ describe("observer context-management prompt", () => {
     expect(prompt).toContain(
       "prepare relevant context for the next coding-agent turn",
     );
+    expect(prompt).toContain("Silence is the normal outcome");
+  });
+
+  it("makes silence the default and names what the agent already holds", () => {
+    expect(OBSERVER_SYSTEM_PROMPT).toContain(
+      "The coding agent sees the whole current session",
+    );
+    expect(OBSERVER_SYSTEM_PROMPT).toContain("Silence is the normal outcome");
+    expect(OBSERVER_SYSTEM_PROMPT).toContain(
+      "Summaries, recaps, or status reports of what just happened",
+    );
+    expect(OBSERVER_SYSTEM_PROMPT).toContain(
+      "Facts you learned only from the observation you were just handed",
+    );
+    expect(OBSERVER_SYSTEM_PROMPT).toContain(
+      "State only what you have verified in MemFS or in a file you read",
+    );
+  });
+
+  it("primes a starting session with a cheatsheet instead of the usual bar", () => {
+    const config: ProjectConfig = {
+      version: 1,
+      agentId: "agent-observer",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages: false },
+      observer: {},
+    };
+    const sessionStart: HarnessEvent = {
+      id: "event-start",
+      harness: "claude-code",
+      type: "session_start",
+      sessionId: "session-1",
+      workingDirectory: "/project",
+      occurredAt: "2026-08-18T00:00:00.000Z",
+      payload: {},
+    };
+
+    const prompt = formatObservationPrompt(
+      sessionStart,
+      config,
+      "Claude Code session session-1 started in /project.",
+      ["send_whisper"],
+      "/project",
+    );
+
+    expect(prompt).toContain("Prime the coding agent before it works");
+    expect(prompt).toContain("compact cheatsheet");
+    expect(prompt).toContain("so it reaches the first turn");
+    // The usual restraint does not apply when there is no transcript yet.
+    expect(prompt).not.toContain("Silence is the normal outcome");
   });
 });
