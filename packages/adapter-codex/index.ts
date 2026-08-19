@@ -147,8 +147,13 @@ export class CodexAdapter implements HarnessAdapter {
   }
 
   contextChannel(nativeEvent: string): ContextChannel | null {
-    // Codex's tool-level hooks are untested from here, so it claims only the
-    // baseline. Widen this once a live run proves more.
+    // Codex 0.147.0 ships a hookSpecificOutput schema for both tool events,
+    // and its error strings show non-empty stdout there must be valid JSON.
+    // SubagentStart also accepts context, but it targets the subagent rather
+    // than the route that caused the observation, so it stays unclaimed.
+    if (nativeEvent === "PreToolUse" || nativeEvent === "PostToolUse") {
+      return "envelope";
+    }
     return defaultContextChannel(nativeEvent);
   }
 }

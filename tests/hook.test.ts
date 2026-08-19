@@ -101,12 +101,33 @@ describe("adapter context channels", () => {
     }
   });
 
-  it("holds the other harnesses to the proven baseline", () => {
+  it("keeps every harness on raw stdout at the prompt boundaries", () => {
+    // Letta Code pushes stdout into context verbatim, so an envelope here
+    // would inject its own JSON as literal text.
     for (const adapter of [codexAdapter, lettaCodeAdapter]) {
       expect(adapter.contextChannel("SessionStart")).toBe("stdout");
       expect(adapter.contextChannel("UserPromptSubmit")).toBe("stdout");
-      expect(adapter.contextChannel("PreToolUse")).toBeNull();
-      expect(adapter.contextChannel("PostToolUse")).toBeNull();
+    }
+  });
+
+  it("gives Codex both tool boundaries", () => {
+    expect(codexAdapter.contextChannel("PreToolUse")).toBe("envelope");
+    expect(codexAdapter.contextChannel("PostToolUse")).toBe("envelope");
+  });
+
+  it("withholds PreToolUse from Letta Code, which reads no context there", () => {
+    // A whisper emitted here would be acknowledged and never seen.
+    expect(lettaCodeAdapter.contextChannel("PreToolUse")).toBeNull();
+    expect(lettaCodeAdapter.contextChannel("PostToolUse")).toBe("envelope");
+    expect(lettaCodeAdapter.contextChannel("PostToolUseFailure")).toBe(
+      "envelope",
+    );
+  });
+
+  it("claims nothing on events no harness reads", () => {
+    for (const adapter of [claudeCodeAdapter, codexAdapter, lettaCodeAdapter]) {
+      expect(adapter.contextChannel("PreCompact")).toBeNull();
+      expect(adapter.contextChannel("SessionEnd")).toBeNull();
     }
   });
 });

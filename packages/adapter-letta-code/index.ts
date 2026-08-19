@@ -117,8 +117,15 @@ export class LettaCodeAdapter implements HarnessAdapter {
   }
 
   contextChannel(nativeEvent: string): ContextChannel | null {
-    // Letta Code's tool-level hooks are untested from here, so it claims only
-    // the baseline. Widen this once a live run proves more.
+    // Letta Code reads additionalContext after a tool runs but not before:
+    // PreToolUse consumes only updatedInput, so a whisper emitted there would
+    // be acknowledged and never seen. PostToolUseFailure has no counterpart in
+    // the other harnesses.
+    if (nativeEvent === "PostToolUse" || nativeEvent === "PostToolUseFailure") {
+      return "envelope";
+    }
+    // SessionStart and UserPromptSubmit push raw stdout into context, so an
+    // envelope there would inject its own JSON as literal text.
     return defaultContextChannel(nativeEvent);
   }
 }

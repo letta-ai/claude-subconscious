@@ -295,9 +295,15 @@ Codex hooks and app-server events provide the working directory, thread ID, and 
 
 The adapter must test passive hook context against Codex CLI 0.147.0 or later.
 
+Codex 0.147.0 ships a `hookSpecificOutput` schema for `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PreToolUse`, and `PostToolUse`. The adapter delivers on the prompt boundaries and both tool events. `SubagentStart` reaches the subagent rather than the route that caused the observation, so it stays unclaimed. `PermissionRequest`, `PreCompact`, `PostCompact`, and `SessionEnd` carry no context field.
+
 The adapter must test `thread/inject_items`, `turn/steer`, and `turn/start` against an active app-server thread. It exposes only the operations that pass.
 
 ### Letta Code
+
+Letta Code reads context asymmetrically across the tool boundary. `PostToolUse` and `PostToolUseFailure` parse `additionalContext`, while `PreToolUse` consumes only `updatedInput`, so a whisper emitted before a tool call would be acknowledged and never seen. The adapter claims the two post-tool events and withholds `PreToolUse`.
+
+`SessionStart` and `UserPromptSubmit` push hook stdout into context verbatim. An envelope on those events would inject its own JSON as literal text, so they stay on the stdout channel.
 
 Letta Code hooks provide the working directory and structured turn fields. Session and prompt hooks include conversation identity. Current Stop input does not, and the hook executor strips conversation environment variables. The initial adapter therefore observes `SessionStart` and `UserPromptSubmit`. It skips a Stop event with no conversation ID rather than routing it through an agent-wide fallback. Completed-turn observation depends on a Letta Code hook contract that supplies the conversation ID.
 
