@@ -566,3 +566,106 @@ describe("broker lifecycle", () => {
     }
   });
 });
+
+describe("session status claim", () => {
+  it("hands the session identity to the first caller only", async () => {
+    const directory = await root();
+    await writeProjectConfig(directory, {
+      version: 1,
+      agentId: "agent-test",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages: false },
+      observer: {},
+    });
+    const descriptor: BrokerDescriptor = {
+      version: 1,
+      endpoint:
+        process.platform === "win32"
+          ? `\\\\.\\pipe\\subconscious-test-${randomUUID()}`
+          : join(directory, "broker.sock"),
+      token: "test-token",
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    };
+    const runtime = {
+      run: async (): Promise<RunObservationResult> => ({
+        status: "success",
+        conversationId: "conv-observer",
+        result: {
+          type: "result",
+          success: true,
+          durationMs: 1,
+          conversationId: "conv-observer",
+          runIds: ["run-observer"],
+        },
+      }),
+    };
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime,
+    });
+    await broker.start();
+    try {
+      const target = {
+        harness: "claude-code" as const,
+        sessionId: "session-status",
+        workingDirectory: directory,
+      };
+
+      // No route exists until the session's first observation is recorded.
+      const beforeRoute = await sendBrokerRequest(descriptor, {
+        type: "claim_session_status",
+        target,
+      });
+      expect(beforeRoute).toMatchObject({
+        ok: true,
+        type: "session_status",
+        status: null,
+      });
+
+      await sendBrokerRequest(descriptor, {
+        type: "observe",
+        event: {
+          id: "event-status",
+          harness: "claude-code" as const,
+          type: "session_start" as const,
+          sessionId: "session-status",
+          workingDirectory: directory,
+          occurredAt: new Date().toISOString(),
+          payload: {},
+        },
+      });
+
+      const claimed = await sendBrokerRequest(descriptor, {
+        type: "claim_session_status",
+        target,
+      });
+      expect(claimed).toMatchObject({
+        ok: true,
+        type: "session_status",
+        status: {
+          agentId: "agent-test",
+          model: "letta/auto",
+          harness: "claude-code",
+          sessionId: "session-status",
+          projectRoot: directory,
+          whispers: true,
+          queuedMessages: false,
+        },
+      });
+
+      const second = await sendBrokerRequest(descriptor, {
+        type: "claim_session_status",
+        target,
+      });
+      expect(second).toMatchObject({
+        ok: true,
+        type: "session_status",
+        status: null,
+      });
+    } finally {
+      await broker.close();
+    }
+  });
+});

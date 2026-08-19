@@ -2,12 +2,14 @@ import { stat } from "node:fs/promises";
 import {
   escapeXml,
   eventId,
+  formatSessionStatus,
   readJsonlDelta,
   truncateText,
   type DeliveryRecord,
   type HarnessAdapter,
   type HarnessEvent,
   type PreparedObservation,
+  type SessionStatus,
   type SourceCursor,
 } from "../core/index.js";
 
@@ -158,6 +160,10 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
 
   formatWhispers(deliveries: DeliveryRecord[]): string {
     return deliveries.map(formatDelivery).join("\n\n");
+  }
+
+  formatStatus(status: SessionStatus): string {
+    return formatSessionStatus(status);
   }
 }
 

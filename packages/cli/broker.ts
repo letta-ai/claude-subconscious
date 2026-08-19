@@ -96,6 +96,8 @@ export class SubconsciousBroker {
         return await this.ack(request.deliveryIds, request.nativeReceipt);
       case "status":
         return { ok: true, type: "status", state: await this.store.snapshot() };
+      case "claim_session_status":
+        return await this.claimSessionStatus(request.target);
       case "reconcile":
         return await this.reconcile(request.eventId, request.action);
       case "shutdown":
@@ -422,6 +424,43 @@ export class SubconsciousBroker {
     const state = await this.store.snapshot();
     const route = state.routes[key];
     return route ? { route, config: project.config } : null;
+  }
+
+  /**
+   * Hand back the session's identity the first time it is asked for.
+   *
+   * The claim is made inside a single store update so two hooks racing on the
+   * same session cannot both win and inject the banner twice.
+   */
+  private async claimSessionStatus(
+    target: DeliveryTarget,
+  ): Promise<BrokerResponse> {
+    const resolved = await this.targetRoute(target);
+    if (!resolved) return { ok: true, type: "session_status", status: null };
+    let claimed = false;
+    await this.store.update((state) => {
+      const route = state.routes[resolved.route.key];
+      if (!route || route.statusSentAt) return;
+      route.statusSentAt = now();
+      route.updatedAt = route.statusSentAt;
+      claimed = true;
+    });
+    if (!claimed) return { ok: true, type: "session_status", status: null };
+    const { route, config } = resolved;
+    return {
+      ok: true,
+      type: "session_status",
+      status: {
+        agentId: route.agentId,
+        model: route.model,
+        harness: route.harness,
+        sessionId: route.sessionId,
+        conversationId: route.conversationId,
+        projectRoot: route.projectRoot,
+        whispers: config.delivery.whispers,
+        queuedMessages: config.delivery.queueMessages,
+      },
+    };
   }
 
   private async lease(

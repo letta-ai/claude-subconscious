@@ -138,6 +138,20 @@ export async function runHook(harness: HarnessId): Promise<void> {
   const event = nativeEvent(input);
 
   if (event === "SessionStart" || event === "UserPromptSubmit") {
+    // The route is created by SessionStart's observe, which runs below, so the
+    // status lands on the first user prompt rather than at session start.
+    const statusResponse = await sendBrokerRequest(descriptor, {
+      type: "claim_session_status",
+      target,
+    });
+    if (
+      statusResponse.ok &&
+      statusResponse.type === "session_status" &&
+      statusResponse.status
+    ) {
+      await writeStdout(adapter.formatStatus(statusResponse.status));
+    }
+
     const response = await sendBrokerRequest(descriptor, {
       type: "lease",
       target,

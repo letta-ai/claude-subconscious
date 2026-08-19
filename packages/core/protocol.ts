@@ -4,6 +4,7 @@ import type {
   DeliveryRecord,
   HarnessEvent,
   HarnessId,
+  SessionStatus,
 } from "./types.js";
 
 export interface DeliveryTarget {
@@ -28,6 +29,7 @@ export type BrokerRequest =
       nativeReceipt?: string;
     }
   | { type: "status"; token: string }
+  | { type: "claim_session_status"; token: string; target: DeliveryTarget }
   | {
       type: "reconcile";
       token: string;
@@ -48,6 +50,12 @@ export type BrokerResponse =
   | { ok: true; type: "leased"; deliveries: DeliveryRecord[] }
   | { ok: true; type: "acknowledged"; deliveryIds: string[] }
   | { ok: true; type: "status"; state: BrokerState }
+  | {
+      ok: true;
+      type: "session_status";
+      /** null when the route is unknown or the status was already claimed. */
+      status: SessionStatus | null;
+    }
   | {
       ok: true;
       type: "reconciled";

@@ -69,8 +69,27 @@ export interface RouteRecord {
   runtimeReportedTools?: string[];
   attachedServerTools?: string[];
   sourceCursor?: SourceCursor;
+  statusSentAt?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Identity of the Subconscious watching a session.
+ *
+ * The install banner is written straight to the terminal, so the harness never
+ * sees which agent is attached. Without this the assistant cannot answer basic
+ * questions about its own Subconscious, so the hook injects it once per session.
+ */
+export interface SessionStatus {
+  agentId: string;
+  model: string;
+  harness: HarnessId;
+  sessionId: string;
+  conversationId: string | null;
+  projectRoot: string;
+  whispers: boolean;
+  queuedMessages: boolean;
 }
 
 export type ObservationStatus =
@@ -148,4 +167,5 @@ export interface HarnessAdapter {
     cursor: SourceCursor | undefined,
   ): Promise<PreparedObservation>;
   formatWhispers(deliveries: DeliveryRecord[]): string;
+  formatStatus(status: SessionStatus): string;
 }

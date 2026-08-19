@@ -227,6 +227,16 @@ The observer maximizes useful context rather than text volume. Progress summarie
 
 Observation processing remains nonblocking. Context prepared from one observation is available at the next safe prompt boundary.
 
+## Session status
+
+Install and start-up banners go to the terminal, so the harness never learns which Subconscious is attached to it. The assistant therefore cannot answer a question as basic as "which agent is watching this session?" without reading configuration files.
+
+The broker exposes the session identity once per route: agent ID, model, harness, project root, conversation, and the delivery channels the project enables. The hook claims it at the same prompt boundary as whispers and the adapter renders it as `<subconscious_status>`.
+
+The claim is atomic. Two hooks racing on one session produce one banner, and a route that has already surrendered its status returns nothing.
+
+The route is created by the session's first observation, so the status lands on the first user prompt rather than at session start.
+
 ## Adapter contract
 
 Each adapter declares its proven capabilities:
@@ -358,6 +368,8 @@ The CLI provides the following commands:
 - [x] Automated tests cover duplicate tool calls and broker restarts before acknowledgement.
 - [x] Tests cover a crash after harness injection but before acknowledgement by reusing the same delivery ID.
 - [x] A stale native session or active-turn ID never redirects a delivery to a replacement session.
+- [x] The session status reaches the harness once per route and reports the agent, model, and delivery channels.
+- [x] A second status claim on the same route returns nothing.
 
 ### Adapters
 

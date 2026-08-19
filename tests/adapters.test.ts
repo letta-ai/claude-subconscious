@@ -134,3 +134,53 @@ describe("harness adapters", () => {
     ).resolves.toBeNull();
   });
 });
+
+describe("session status", () => {
+  const status = {
+    agentId: "agent-f036ea00-dded-4f58-ab3b-044d2f42f9c5",
+    model: "letta/auto",
+    harness: "claude-code" as const,
+    sessionId: "session-one",
+    conversationId: "conv-one",
+    projectRoot: "/project",
+    whispers: true,
+    queuedMessages: false,
+  };
+
+  it("reports the agent identity the terminal banner never shows the harness", () => {
+    const output = claudeCodeAdapter.formatStatus(status);
+    expect(output).toContain("<subconscious_status>");
+    expect(output).toContain(
+      "Agent ID: agent-f036ea00-dded-4f58-ab3b-044d2f42f9c5",
+    );
+    expect(output).toContain("Model: letta/auto");
+    expect(output).toContain("Harness: claude-code");
+    expect(output).toContain("Conversation: conv-one");
+    expect(output).toContain(
+      "Supervise: https://app.letta.com/agents/agent-f036ea00-dded-4f58-ab3b-044d2f42f9c5?conversation=conv-one",
+    );
+  });
+
+  it("names only the delivery channels the project enables", () => {
+    expect(claudeCodeAdapter.formatStatus(status)).toContain(
+      "It reaches you through whispers into your context.",
+    );
+    expect(
+      codexAdapter.formatStatus({ ...status, queuedMessages: true }),
+    ).toContain("whispers into your context and queued messages");
+    expect(
+      lettaCodeAdapter.formatStatus({ ...status, whispers: false }),
+    ).toContain("It is observing only; no delivery channel is enabled.");
+  });
+
+  it("falls back to the agent link when no conversation exists yet", () => {
+    const output = claudeCodeAdapter.formatStatus({
+      ...status,
+      conversationId: null,
+    });
+    expect(output).not.toContain("Conversation:");
+    expect(output).toContain(
+      "Supervise: https://app.letta.com/agents/agent-f036ea00-dded-4f58-ab3b-044d2f42f9c5",
+    );
+  });
+});

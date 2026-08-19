@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import {
   escapeXml,
   eventId,
+  formatSessionStatus,
   truncateText,
   type DeliveryRecord,
   type HarnessAdapter,
   type HarnessEvent,
   type PreparedObservation,
+  type SessionStatus,
   type SourceCursor,
 } from "../core/index.js";
 
@@ -106,6 +108,10 @@ export class LettaCodeAdapter implements HarnessAdapter {
           `<subconscious_whisper delivery_id="${escapeXml(delivery.id)}">\n${escapeXml(delivery.text)}\n</subconscious_whisper>`,
       )
       .join("\n\n");
+  }
+
+  formatStatus(status: SessionStatus): string {
+    return formatSessionStatus(status);
   }
 }
 
