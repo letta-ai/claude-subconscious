@@ -8,7 +8,7 @@ import type { HarnessEvent, ProjectConfig } from "../packages/core/index.js";
 describe("observer context-management prompt", () => {
   it("defines MemFS routing, retrieval, and next-turn delivery", () => {
     expect(OBSERVER_SYSTEM_PROMPT).toContain(
-      "the context manager for coding-agent sessions",
+      "observes coding agents and builds memory across all of them",
     );
     expect(OBSERVER_SYSTEM_PROMPT).toContain(
       "Retrieve related context from MemFS",
