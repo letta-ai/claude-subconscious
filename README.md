@@ -193,7 +193,8 @@ When the agent's model isn't available, the plugin selects from available models
 6. `google_ai/gemini-3-flash` (Google's balanced option)
 7. `google_ai/gemini-2.5-flash` (fallback)
 8. `minimax/MiniMax-M2.7` (MiniMax flagship, 1M context)
-9. First available model on the server
+9. `orcarouter/auto` (OrcaRouter smart-routing gateway)
+10. First available model on the server
 
 #### Manual Override
 
@@ -212,6 +213,7 @@ The model handle format is `provider/model`. Common options:
 | `anthropic` | `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-haiku-4-5` |
 | `google_ai` | `gemini-3-flash`, `gemini-2.5-flash`, `gemini-2.5-pro` |
 | `minimax` | `MiniMax-M2.7` (1M context) |
+| `orcarouter` | `auto` (OrcaRouter smart-routing gateway) |
 | `zai` | `glm-5` (Letta Cloud default, free) |
 
 If `LETTA_MODEL` is set but not available on the server, the plugin will warn you and fall back to auto-selection.
@@ -219,6 +221,18 @@ If `LETTA_MODEL` is set but not available on the server, the plugin will warn yo
 The default bundled agent uses `zai/glm-5` (free on Letta Cloud). For better tool usage and reasoning, consider switching to a stronger model. You can change the model at any time via the [Agent Development Environment](https://app.letta.com) (ADE) or by setting `LETTA_MODEL`.
 
 **Note:** Ensure your Letta server has the appropriate API key configured for your chosen provider (e.g., `OPENAI_API_KEY` for OpenAI models).
+
+#### Using OrcaRouter as your model gateway
+
+[OrcaRouter](https://www.orcarouter.ai) is a unified AI gateway that routes every request to the best model for the job — one API key, one endpoint, all providers. It also runs gateway-level, zero-trust security for AI agents on the same endpoint — screening every prompt/response and governing every tool call on a default-deny basis, with no application code changes.
+
+If your Letta server exposes an OrcaRouter provider (`provider_type: orcarouter`), point Subconscious at it with the `orcarouter/auto` smart-routing handle:
+
+```bash
+export LETTA_MODEL="orcarouter/auto"
+```
+
+`auto` routes each request to the most suitable upstream model automatically, so you get strong reasoning and tool use without pinning to a specific model. Like any other provider, the plugin auto-selects `orcarouter/auto` from the available-models list when it's present and the configured model isn't. To use OrcaRouter with a self-hosted Letta server, configure the server's `ORCAROUTER_API_KEY` alongside its base URL, then set `LETTA_BASE_URL` to that server.
 
 ## Default Subconscious Agent
 
