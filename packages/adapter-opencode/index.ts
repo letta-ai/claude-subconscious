@@ -247,14 +247,41 @@ function midTurnHeader(event: HarnessEvent): string {
 }
 
 /**
+ * Find the longest suffix of the previous bounded tail that equals a prefix of
+ * the current tail. This recognizes ordinary window slides after an append,
+ * while a rewrite or truncation with no safe overlap still forces a replay.
+ * Matching whole runs also avoids choosing an ambiguous single marker.
+ */
+function overlapLength(previousTail: string[], currentTail: string[]): number {
+  const maxLength = Math.min(previousTail.length, currentTail.length);
+  for (let length = maxLength; length > 0; length -= 1) {
+    let matches = true;
+    for (let index = 0; index < length; index += 1) {
+      if (
+        previousTail[previousTail.length - length + index] !==
+        currentTail[index]
+      ) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return length;
+  }
+  return 0;
+}
+
+/**
  * Render the delta between a cursor marker and the current tail.
  *
- * The marker names the last record a previous observation reported. When that
- * record has vanished — compaction rewrote history, a mutable part was
- * replaced, or the bounded tail rotated past it — the whole visible tail is
- * replayed behind an explicit note: telling the observer something twice beats
- * letting it miss something once. A missing marker with no prior cursor is the
- * first read of a session and renders the tail without the note.
+ * The marker names the tail a previous observation reported. When none of it
+ * safely overlaps the current tail — compaction rewrote history, a mutable
+ * part was replaced in place, or the bounded window slid past every record
+ * the marker named — the whole visible tail is replayed behind an explicit
+ * note: telling the observer something twice beats letting it miss something
+ * once. An ordinary append that only slides the bounded window, with no
+ * rewrite, emits just the records after the overlap instead of replaying the
+ * whole tail. A missing marker with no prior cursor is the first read of a
+ * session and renders the tail without the note.
  */
 export function renderDelta(
   records: TranscriptRecord[],
@@ -270,16 +297,21 @@ export function renderDelta(
     const previousTail = decodeTailMarker(marker);
     if (previousTail) {
       const currentTail = records.map(recordMarker);
-      const samePrefix =
-        currentTail.length >= previousTail.length &&
-        previousTail.every((entry, index) => currentTail[index] === entry);
-      if (samePrefix) startIndex = previousTail.length;
+      const overlap = overlapLength(previousTail, currentTail);
+      if (overlap > 0) startIndex = overlap;
       else replayed = true;
     } else {
-      // Backward compatibility with the earlier final-record-only marker.
-      const found = records.findIndex(
-        (record) => recordMarker(record) === marker,
-      );
+      // Backward compatibility with the earlier final-record-only marker,
+      // which named just one record rather than a whole tail. The last
+      // occurrence is the safer anchor if it were ever to repeat: it cannot
+      // skip a later record that shares an earlier one's marker.
+      let found = -1;
+      for (let index = records.length - 1; index >= 0; index -= 1) {
+        if (recordMarker(records[index]!) === marker) {
+          found = index;
+          break;
+        }
+      }
       if (found >= 0) startIndex = found + 1;
       else replayed = true;
     }
@@ -293,7 +325,6 @@ export function renderDelta(
   const note = replayed
     ? "[Earlier transcript records were compacted, rewritten, or truncated; the recent tail is replayed rather than skipped.]\n\n"
     : "";
-  const last = slice[slice.length - 1];
   return {
     text: `${note}${body}`,
     nextCursor: { marker: encodeTailMarker(records) },

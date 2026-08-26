@@ -9,8 +9,9 @@ import { atomicWriteFile, type KnownHarnessId } from "../core/index.js";
  * `.opencode/plugins/*.js`, so one self-contained file is the whole
  * integration. The file owns every native hook, speaks newline-delimited JSON
  * to the hidden `subconscious opencode-bridge` subprocess found on PATH, and
- * never imports anything from the Subconscious package — no runtime
- * dependency installation and no absolute worktree paths.
+ * never imports anything from the Subconscious package. No runtime
+ * dependency installation and no absolute worktree paths. If PATH has no
+ * `subconscious` binary, the plugin warns once at startup and stays idle.
  *
  * Delivery contract implemented here (see SPEC):
  * - Prompt-boundary passive context happens in `chat.message`, where one
@@ -27,6 +28,15 @@ import { atomicWriteFile, type KnownHarnessId } from "../core/index.js";
 
 /** First line identifying a file this installer owns. */
 export const OPENCODE_PLUGIN_MARKER = "// subconscious-opencode-plugin";
+
+/**
+ * One-line warning when the generated plugin loads without a CLI on PATH.
+ *
+ * Printed once at startup. It must not include PATH contents, candidate
+ * paths, or secrets.
+ */
+export const OPENCODE_MISSING_CLI_WARNING =
+  "Subconscious plugin: subconscious CLI not found on PATH. The plugin is idle until the CLI is installed and OpenCode restarts.";
 
 export const OPENCODE_PLUGIN_SOURCE = [
   "// subconscious-opencode-plugin",
@@ -258,7 +268,11 @@ export const OPENCODE_PLUGIN_SOURCE = [
   "  var disposed = false;",
   "  var bin = findSubconsciousBin(process.env);",
   "  var bridge = null;",
-  "  if (bin) bridge = new Bridge(bin);",
+  "  if (bin) {",
+  "    bridge = new Bridge(bin);",
+  "  } else {",
+  `    console.warn(${JSON.stringify(OPENCODE_MISSING_CLI_WARNING)});`,
+  "  }",
   "",
   "  function ensureSession(sessionId, directory) {",
   "    var entry = sessions.get(sessionId);",

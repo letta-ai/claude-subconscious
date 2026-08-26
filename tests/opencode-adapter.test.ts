@@ -3,6 +3,7 @@ import {
   normalizeSnapshot,
   opencodeAdapter,
   renderDelta,
+  type TranscriptRecord,
 } from "../packages/adapter-opencode/index.js";
 
 function snapshot(messages: unknown[]) {
@@ -195,6 +196,99 @@ describe("opencode adapter", () => {
     });
     expect(delta.text).toContain("second");
     expect(delta.text).not.toContain("first");
+  });
+
+  it("emits only the new suffix when an ordinary append slides the bounded window past MAX_RECORDS", () => {
+    const first = normalizeSnapshot(
+      snapshot(
+        Array.from({ length: 30 }, (_, index) =>
+          textMessage(`m${index}`, "assistant", `tail-${index}`),
+        ),
+      ),
+    );
+    const initial = renderDelta(first, undefined);
+    expect(initial.text).not.toContain("replayed rather than skipped");
+
+    // Three more messages append with nothing rewritten. The bounded window
+    // now holds m3..m32, evicting m0..m2 - a plain slide, not a rewrite.
+    const second = normalizeSnapshot(
+      snapshot(
+        Array.from({ length: 33 }, (_, index) =>
+          textMessage(`m${index}`, "assistant", `tail-${index}`),
+        ),
+      ),
+    );
+
+    const delta = renderDelta(second, initial.nextCursor);
+    expect(delta.text).not.toContain("replayed rather than skipped");
+    // Exactly the three genuinely new records, in order, and nothing from
+    // the 27-record overlap the window kept from the previous report.
+    expect(delta.text.split("\n\n")).toEqual([
+      "OpenCode:\ntail-30",
+      "OpenCode:\ntail-31",
+      "OpenCode:\ntail-32",
+    ]);
+    expect(delta.nextCursor?.marker).toMatch(/^tail:/);
+  });
+
+  it("replays the bounded tail when a window slide also rewrites an overlapping record", () => {
+    const first = normalizeSnapshot(
+      snapshot(
+        Array.from({ length: 30 }, (_, index) =>
+          textMessage(`m${index}`, "assistant", `tail-${index}`),
+        ),
+      ),
+    );
+    const initial = renderDelta(first, undefined);
+
+    // m30 is a genuinely new message, but m5 - still inside the surviving
+    // window (m1..m30) - was rewritten in place. No overlap length can be
+    // safe here: every candidate spans either the rewritten record or the
+    // evicted m0, so this must fall back to a full replay, not a partial one
+    // that would hide the m5 rewrite.
+    const messages = Array.from({ length: 30 }, (_, index) =>
+      textMessage(`m${index}`, "assistant", `tail-${index}`),
+    );
+    messages[5] = textMessage("m5", "assistant", "tail-5-rewritten");
+    messages.push(textMessage("m30", "assistant", "tail-30"));
+    const second = normalizeSnapshot(snapshot(messages));
+
+    const delta = renderDelta(second, initial.nextCursor);
+    expect(delta.text).toContain("replayed rather than skipped");
+    expect(delta.text).toContain("tail-5-rewritten");
+    expect(delta.text).toContain("tail-30");
+    expect(delta.text).toContain("tail-29");
+  });
+
+  it("resolves the overlap deterministically even when a marker repeats inside the previous tail", () => {
+    // Hand-built records rather than normalizeSnapshot: a real session can
+    // never repeat a `key`, since it is a part identity OpenCode never
+    // reuses, so this exercises overlapLength's defensive path directly
+    // rather than relying on a producible-in-practice snapshot.
+    const record = (key: string, text: string): TranscriptRecord => ({
+      key,
+      version: "v1",
+      role: "assistant",
+      kind: "text",
+      text,
+    });
+    const previous = [
+      record("a", "alpha"),
+      record("b", "beta"),
+      record("a", "alpha"),
+      record("c", "gamma"),
+    ];
+    const initial = renderDelta(previous, undefined);
+    expect(initial.nextCursor?.marker).toMatch(/^tail:/);
+
+    const current = [...previous, record("d", "delta")];
+    const delta = renderDelta(current, initial.nextCursor);
+
+    expect(delta.text).not.toContain("replayed rather than skipped");
+    expect(delta.text).toContain("delta");
+    expect(delta.text).not.toContain("alpha");
+    expect(delta.text).not.toContain("beta");
+    expect(delta.text).not.toContain("gamma");
   });
 
   it("derives completed and failed tool states from the snapshot", async () => {

@@ -402,13 +402,13 @@ Claude Code has no proven external queue API. `queue_message` stays unavailable 
 
 Codex hooks and app-server events provide the working directory, thread ID, and lifecycle events.
 
-The adapter must test passive hook context against Codex CLI 0.147.0 or later.
+Passive hook context is claimed from the Codex 0.147.0 `hookSpecificOutput` schema. A real Codex CLI test is still pending.
 
 Codex 0.147.0 ships a `hookSpecificOutput` schema for `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PreToolUse`, and `PostToolUse`. The adapter delivers on the prompt boundaries and both tool events. `SubagentStart` reaches the subagent rather than the route that caused the observation, so it stays unclaimed. `PermissionRequest`, `PreCompact`, `PostCompact`, and `SessionEnd` carry no context field. The installer registers `SessionStart`, `UserPromptSubmit`, `Stop`, and both tool events in `$CODEX_HOME/hooks.json`, with `.*` as the tool matcher.
 
 The adapter observes `SessionStart`, `UserPromptSubmit`, and `Stop`, and with `observer.mid_turn` enabled it also observes `PostToolUse` under the Claude Code mid-turn rules above. A prompt observation follows the Claude Code rule above: it reports the prompt from the hook input and leaves the transcript cursor to `Stop`. Codex 0.147.0's `user-prompt-submit.command.input` schema requires a `prompt` string and a `turn_id`, and its `stop.command.input` schema requires the same `turn_id`, so the prompt event ID carries the native event name, the turn ID, and the prompt text. A build that omits the prompt produces an observation that says so rather than an empty one.
 
-The adapter must test `thread/inject_items`, `turn/steer`, and `turn/start` against an active app-server thread. It exposes only the operations that pass.
+`thread/inject_items`, `turn/steer`, and `turn/start` stay unadvertised until a live app-server test passes.
 
 ### Letta Code
 
@@ -422,7 +422,7 @@ The hook executor supports passive `additionalContext`. The adapter must still p
 
 The adapter does not observe tool boundaries. Its completed-turn observation is still blocked on a hook contract that supplies the conversation ID, and it reads no transcript, so it has no delta a mid-turn observation could report. Mid-turn observation reaches Letta Code when completed-turn observation does.
 
-A Letta Code session is a Letta agent in a Letta conversation, so `queue_message` needs no harness queue API. The adapter reports the coding agent's agent and conversation IDs from hook input, and the broker writes the message into that conversation through the Agent SDK. Claude Code and Codex are foreign harnesses whose hooks cannot start a turn, so they keep `queue_message` disabled.
+A Letta Code session is a Letta agent in a Letta conversation, so `queue_message` needs no harness queue API. The adapter reports the coding agent's agent and conversation IDs from hook input, and the broker writes the message into that conversation through the Agent SDK. Broker tests cover that path. A live turn into a running Letta Code conversation is still pending. Claude Code, Codex, Hermes, and OpenCode are foreign harnesses whose hooks cannot start a turn, so they keep `queue_message` disabled.
 
 ### Hermes
 
@@ -434,7 +434,7 @@ The canonical transcript is the SQLite store `<hermes-home>/state.db`, table `me
 
 Because one global broker may have been started by any harness, the broker's environment proves nothing about which Hermes profile owns an event. The hook subprocess stamps its resolved HERMES_HOME into every payload, and every later transcript read uses that per-event path. Profile resolution mirrors upstream `_apply_profile_override`: a HERMES_HOME whose immediate parent is named `profiles` is final; any other value still follows `<root>/active_profile`.
 
-The installer edits the active profile's `config.yaml` textually so user comments survive byte-for-byte, deduplicates per `(event, exact command)` so unrelated hooks on the same event are preserved, refuses flow-shaped `hooks:` blocks rather than corrupting them, and seeds exactly the four consent allowlist entries in `shell-hooks-allowlist.json` without touching `hooks_auto_accept`. A malformed or unreadable allowlist is reported, never overwritten. Capabilities: passive context yes, queued messages no, transcript file.
+The installer edits the active profile's `config.yaml` textually so user comments survive byte-for-byte, deduplicates per `(event, exact command)` so unrelated hooks on the same event are preserved, refuses flow-shaped `hooks:` blocks rather than corrupting them, and seeds exactly the four consent allowlist entries in `shell-hooks-allowlist.json` without touching `hooks_auto_accept`. A malformed or unreadable allowlist is reported, never overwritten. Capabilities: passive context yes, queued messages no, transcript file. Live `hermes chat` whisper read-back is still pending.
 
 ### OpenCode
 
@@ -448,7 +448,7 @@ Passive delivery uses two channels because the host treats prompt and mid-turn c
 
 `observer.mid_turn` saves OpenCode the expensive path when a project does not use it: the plugin checks project facts through the bridge before each terminal `message.part.updated` tool event, and on success it fetches one local snapshot and enqueues one local observation request per observed tool boundary. The broker still coalesces those records behind `mid_turn_min_tool_calls` and `mid_turn_min_seconds`, so the observer-turn cost stays bounded by the thresholds rather than by raw tool count.
 
-The installer writes only `.opencode/plugins/subconscious.js` under the selected project root. It is byte-stable and idempotent, rewrites only files carrying its ownership marker, and refuses a conflicting target rather than overwriting it. Session-end pending-delivery cleanup remains TTL-based; the adapter does not purge deliveries merely because the OpenCode session ended.
+The installer writes only `.opencode/plugins/subconscious.js` under the selected project root. It is byte-stable and idempotent, rewrites only files carrying its ownership marker, and refuses a conflicting target rather than overwriting it. If the generated plugin loads and `subconscious` is not on PATH, it prints one startup warning and stays idle. It does not print PATH contents, candidate paths, or secrets. Session-end pending-delivery cleanup remains TTL-based; the adapter does not purge deliveries merely because the OpenCode session ended. Live proof covers resumed-session prompt delivery and post-commit terminal tool observation. Mid-turn `experimental.chat.system.transform` delivery is covered by plugin tests, not the live CLI suite.
 
 ## Durable state
 
@@ -580,12 +580,12 @@ The CLI provides the following commands:
 - [x] Automated tests cover duplicate tool calls and broker restarts before acknowledgement.
 - [x] Tests cover a crash after harness injection but before acknowledgement by reusing the same delivery ID.
 - [x] A stale native session or active-turn ID never redirects a delivery to a replacement session.
-- [x] `queue_message` reaches a Letta Code conversation through the Agent SDK without a hook lease.
+- [x] Broker tests cover the Letta Code `queue_message` delivery path without a hook lease.
 - [x] The broker drains a directly delivered queued-message turn and acknowledges it only after a successful terminal result.
 - [x] A queued message whose conversation changed owner is stale and is not redirected.
 - [x] A failed direct delivery stays pending, records the reason, and is retried after a broker restart.
 - [x] A project that has not set `queue_messages = true` sends nothing.
-- [x] A live turn proves that a queued message reaches a running Letta Code conversation.
+- [ ] A live turn proves that a queued message reaches a running Letta Code conversation.
 - [x] The session status reaches the harness once per route as one compact identity element.
 - [x] A second status claim on the same route returns nothing.
 - [x] A real `claude` process reads a whisper back verbatim, at a prompt boundary and at a tool boundary, and the session transcript names the boundary that carried it.
@@ -599,12 +599,15 @@ The CLI provides the following commands:
 - [x] A whisper reaches only the session that earned it, and no whisper leaves a directory no project configures.
 - [x] A shutting-down broker finishes an observer turn already in flight, and its socket closes first, so stopping waits for the process rather than for the ping.
 - [x] OpenCode appends one combined status-plus-whisper block at the prompt boundary through a synthetic `chat.message` text part and acknowledges only after that append succeeds.
-- [x] OpenCode uses `experimental.chat.system.transform` only as the mid-turn whisper channel after the prompt boundary has passed.
+- [x] Plugin tests prove OpenCode uses `experimental.chat.system.transform` only as the mid-turn whisper channel after the prompt boundary has passed.
+- [ ] A live OpenCode session reads a mid-turn whisper through `experimental.chat.system.transform`.
 - [x] OpenCode child sessions keep separate routes, and session end does not force-delete pending deliveries ahead of TTL.
+- [x] A generated OpenCode plugin that cannot find `subconscious` on PATH warns once at startup and stays idle without spawning a bridge.
 
 ### Adapters
 
-- [x] The Claude Code adapter proves project discovery, incremental observation, and passive whisper delivery in the real CLI.
+- [x] Unit tests prove Claude Code project discovery and incremental transcript observation.
+- [x] A real `claude` process reads a seeded whisper back at a prompt boundary and at a `PostToolUse` boundary.
 - [x] The Claude Code adapter does not call Letta before each tool call. Tool-boundary delivery reaches the local broker only.
 - [x] A hook against a ready broker costs well under the tightest harness budget, and a hook against a missing or stale one gives up rather than spending that budget.
 - [x] Shutting down does not wait on an observer turn.
@@ -612,20 +615,21 @@ The CLI provides the following commands:
 - [x] The installer registers every event an adapter claims a channel for, and no event it returns null for.
 - [x] Tool-level hooks are installed with the harness's own every-tool matcher, and simple events are installed without one.
 - [x] Rerunning `subconscious install` for a harness leaves exactly one Subconscious hook per event.
-- [ ] The Codex adapter proves project discovery and incremental observation in the real CLI.
-- [x] The Codex adapter exposes only live-tested passive and queue capabilities.
+- [ ] The Codex adapter proves project discovery, incremental observation, and passive whisper delivery in the real CLI.
+- [x] The Codex adapter claims prompt and tool-boundary passive delivery from the 0.147.0 `hookSpecificOutput` schema, and does not advertise queue APIs.
 - [ ] The Letta Code adapter proves passive delivery through a real turn before release.
+- [ ] A live `hermes chat` process reads a whisper back at `pre_llm_call`.
 - [x] Each adapter reports unsupported capabilities without fallback behavior.
 - [x] Every adapter observes the user's prompt at submission, so the observation runs beside the turn that answers it rather than after it.
 - [x] A prompt observation carries the prompt text from the hook input, stays bounded, and leaves the transcript cursor unchanged.
 - [x] A prompt event ID never matches the `Stop` event ID of the same turn, and two different prompts produce two IDs.
 - [x] A prompt hook that carries no prompt text produces a labelled observation rather than an error or an empty one.
 - [x] A `tool_result` event carries route and tool identity only, never the tool input or the tool output.
-- [x] Adapters observe `PostToolUse` and not `PreToolUse`, and a mid-turn observation advances the same transcript cursor as the completed turn.
+- [x] Claude Code and Codex observe `PostToolUse` and not `PreToolUse`. A mid-turn observation on those harnesses advances the same transcript cursor as the completed turn. Letta Code does not observe tool events. Hermes observes `post_tool_call`. OpenCode observes terminal `message.part.updated` when mid-turn is enabled.
 - [x] Two tool calls in one turn produce two event IDs even when the transcript marker has not moved.
 - [x] OpenCode transcript snapshots normalize to bounded `key#version` records, so mutable same-ID rewrites replay the visible tail instead of being skipped.
-- [x] The OpenCode adapter proves observation and passive whisper delivery through a real OpenCode CLI/model turn, including resumed-session prompt delivery and post-commit terminal tool observation.
-- [x] A live session proves that a mid-turn whisper reaches the coding agent at a tool boundary inside the turn.
+- [x] The OpenCode adapter proves observation and passive whisper delivery through a real OpenCode CLI/model turn for resumed-session prompt delivery and post-commit terminal tool observation.
+- [x] A live Claude Code session proves that a mid-turn whisper reaches the coding agent at a `PostToolUse` boundary inside the turn.
 
 ### Product validation
 

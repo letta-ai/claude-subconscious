@@ -8,17 +8,26 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { pathToFileURL } from "node:url";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { installAdapter as installCliAdapter } from "../packages/cli/install.js";
 import {
   installOpencode,
+  OPENCODE_MISSING_CLI_WARNING,
   OPENCODE_PLUGIN_MARKER,
   OPENCODE_PLUGIN_SOURCE,
 } from "../packages/cli/install-opencode.js";
 
 const roots: string[] = [];
+const originalPath = process.env.PATH;
+const originalWindowsPath = process.env.Path;
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  if (originalPath === undefined) delete process.env.PATH;
+  else process.env.PATH = originalPath;
+  if (originalWindowsPath === undefined) delete process.env.Path;
+  else process.env.Path = originalWindowsPath;
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -126,5 +135,82 @@ describe("opencode installation", () => {
     expect(OPENCODE_PLUGIN_SOURCE).toContain(
       'spawn(command, ["opencode-bridge"]',
     );
+  });
+
+  it("warns once when subconscious is missing from PATH, then stays idle", async () => {
+    const project = await root();
+    const result = await installOpencode(project);
+    expect(OPENCODE_PLUGIN_SOURCE).toContain(OPENCODE_MISSING_CLI_WARNING);
+
+    const secretDir = join(project, "secret-bin-token");
+    await mkdir(secretDir, { recursive: true });
+    process.env.PATH = secretDir;
+    process.env.Path = secretDir;
+
+    const warnings: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((...args) => {
+      warnings.push(args.map(String).join(" "));
+    });
+
+    const module = await import(
+      `${pathToFileURL(result.path).href}?missing-path=${Date.now()}`
+    );
+    const hooks = (await module.default({
+      client: {
+        session: {
+          messages: async () => ({ data: [] }),
+        },
+      },
+      directory: project,
+    })) as {
+      event?: (input: unknown) => Promise<void>;
+      "chat.message"?: (
+        messageInput: unknown,
+        output: { parts: unknown[] },
+      ) => Promise<void>;
+      "experimental.chat.system.transform"?: (
+        transformInput: unknown,
+        output: { system: unknown[] },
+      ) => Promise<void>;
+      dispose?: () => Promise<void>;
+    };
+
+    const output = {
+      parts: [{ type: "text", text: "hello", synthetic: false }],
+    };
+    const system = { system: ["existing"] };
+    await hooks.event?.({
+      event: {
+        type: "session.created",
+        properties: { info: { id: "session-1", directory: project } },
+      },
+    });
+    await hooks["chat.message"]?.(
+      { sessionID: "session-1", messageID: "msg-1" },
+      output,
+    );
+    await hooks["experimental.chat.system.transform"]?.(
+      { sessionID: "session-1" },
+      system,
+    );
+    await hooks.event?.({
+      event: {
+        type: "session.status",
+        properties: {
+          sessionID: "session-1",
+          status: { type: "idle" },
+        },
+      },
+    });
+    await hooks.dispose?.();
+
+    expect(warnings).toEqual([OPENCODE_MISSING_CLI_WARNING]);
+    expect(warnings.join("\n")).not.toContain(secretDir);
+    expect(OPENCODE_PLUGIN_SOURCE).toContain(
+      "if (bin) {\n    bridge = new Bridge(bin);\n  } else {",
+    );
+    expect(output.parts).toHaveLength(1);
+    expect(system.system).toEqual(["existing"]);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });

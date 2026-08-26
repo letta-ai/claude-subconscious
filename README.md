@@ -37,7 +37,7 @@ Each native harness session maps to one Letta conversation. The broker serialize
 
 1. **The harness calls its adapter.** The event includes the working directory, native session ID, and event type.
 2. **The adapter finds the project configuration.** It searches parent directories for the nearest `subconscious.toml`. It exits when no configuration applies.
-3. **The hook delivers pending whispers.** On `SessionStart` and `UserPromptSubmit`, the hook leases pending whispers before it records the current event. It formats each whisper for the harness and acknowledges delivery.
+3. **The hook delivers pending whispers.** It leases pending whispers at each native event that can carry context, then formats them and acknowledges delivery. Claude Code and Codex deliver at prompt and tool boundaries. Hermes delivers only at the next `pre_llm_call`. OpenCode delivers at the prompt through a synthetic chat part and uses a system transform for mid-turn delivery.
 4. **The broker records the observation.** It rejects duplicate event IDs and maps the native session to one Letta conversation. It serializes observations that share an observer agent.
 5. **The Subconscious agent uses its own judgment.** The session primer explains that it is monitoring the transcript and can guide the observed agent when important. Its existing identity, memory, shared repositories, and system prompt remain intact.
 6. **Later observations stay small.** Each subsequent message contains only the new transcript event. When useful, the Subconscious agent calls `send_whisper`; ordinary assistant text is discarded.
@@ -157,7 +157,7 @@ Install the bundled plugin:
 /plugin install claude-subconscious@claude-subconscious
 ```
 
-The plugin runs `SessionStart`, `UserPromptSubmit`, and `Stop` hooks. It does not poll before each tool call.
+The plugin runs `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`. `PreToolUse` and `PostToolUse` deliver pending whispers through the local broker. They do not call Letta.
 
 ### Codex
 
@@ -165,7 +165,7 @@ The plugin runs `SessionStart`, `UserPromptSubmit`, and `Stop` hooks. It does no
 subconscious install codex
 ```
 
-This command adds Subconscious hooks to `~/.codex/hooks.json`. It preserves existing hooks.
+This command adds Subconscious hooks to `~/.codex/hooks.json`. It preserves existing hooks. Passive delivery is claimed from the Codex 0.147.0 hook schema. A real Codex CLI test is still pending.
 
 ### Letta Code
 
@@ -204,6 +204,8 @@ OpenCode transcript deltas come from the official `client.session.messages` API.
 Passive delivery uses two host-specific channels. At the prompt boundary, after `chat.message` has captured the original prompt for observation, the plugin leases the delivery window and appends one synthetic text part containing the combined status-plus-whisper block to `output.parts`; acknowledgement follows only after that append succeeds. This is the reliable resumed-session channel, and transcript normalization ignores that synthetic part. `experimental.chat.system.transform` remains the mid-turn model-step channel for whispers produced after the prompt while a turn is already running; it appends whispers there and acknowledges after that mutation succeeds. OpenCode does not support `queue_message`, and pending-delivery cleanup after session end remains TTL-based rather than forced by the harness.
 
 With `observer.mid_turn = true`, each observed tool boundary costs one local snapshot fetch and one local broker enqueue attempt, not an observer turn by itself. The broker still coalesces busy runs behind `mid_turn_min_tool_calls` and `mid_turn_min_seconds`, so the cost is bounded by those thresholds rather than by raw tool count.
+
+If OpenCode loads the plugin and the `subconscious` CLI is not on PATH, the plugin prints one startup warning and stays idle. It does not print PATH contents or candidate paths.
 
 ## Operate the broker
 
@@ -280,8 +282,10 @@ The approved design is in [`specs/SPEC-0000-harness-neutral-subconscious.md`](sp
 ## Current limits
 
 - The first implementation targets Letta Cloud.
-- Harness queue delivery remains disabled until each native queue passes a live acceptance test.
-- OpenCode's adapter, installer, snapshot replay, generated-plugin bridge, and real CLI/model delivery path are covered by focused tests. The live suite proves a resumed OpenCode session receives a seeded whisper on the prompt boundary, that the observer sees the terminal bash result through the post-commit tool path, and that the whisper reaches only the intended session.
-- Current Letta Code Stop hooks omit the conversation ID and strip conversation environment variables. The adapter observes `SessionStart` and `UserPromptSubmit` safely. Completed-turn observation needs a Letta Code hook contract update.
+- Queue delivery is enabled only for Letta Code. Broker tests cover `queue_message`; a live turn into a running conversation is still pending.
+- Codex passive delivery is claimed from the 0.147.0 hook schema. A real Codex CLI test is still pending.
+- Hermes live whisper read-back against `hermes chat` is still pending.
+- OpenCode's adapter, installer, snapshot replay, generated-plugin bridge, and real CLI/model delivery path are covered by focused tests. The live suite proves a resumed OpenCode session receives a seeded whisper on the prompt boundary, that the observer sees the terminal bash result through the post-commit tool path, and that the whisper reaches only the intended session. Mid-turn `experimental.chat.system.transform` delivery is covered by plugin tests, not that live suite.
+- Current Letta Code Stop hooks omit the conversation ID and strip conversation environment variables. The adapter observes `SessionStart` and `UserPromptSubmit` safely. Completed-turn observation needs a Letta Code hook contract update. Passive delivery through a real Letta Code turn is still pending.
 - The redaction interface is planned, but the first implementation has no general redaction engine.
 - An existing observer agent can have server-side tools. The Subconscious client allowlist does not control those tools.
