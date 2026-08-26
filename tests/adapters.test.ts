@@ -431,38 +431,26 @@ describe("session status", () => {
 
   it("reports the agent identity the terminal banner never shows the harness", () => {
     const output = claudeCodeAdapter.formatStatus(status);
-    expect(output).toContain("<subconscious_status>");
-    expect(output).toContain(
-      "Agent ID: agent-f036ea00-dded-4f58-ab3b-044d2f42f9c5",
-    );
-    expect(output).toContain("Model: letta/auto");
-    expect(output).toContain("Harness: claude-code");
-    expect(output).toContain("Conversation: conv-one");
-    expect(output).toContain(
-      "Supervise: https://app.letta.com/agents/agent-f036ea00-dded-4f58-ab3b-044d2f42f9c5?conversation=conv-one",
+    expect(output).toBe(
+      '<subconscious_status agent_id="agent-f036ea00-dded-4f58-ab3b-044d2f42f9c5" conversation_id="conv-one" />',
     );
   });
 
-  it("names only the delivery channels the project enables", () => {
-    expect(claudeCodeAdapter.formatStatus(status)).toContain(
-      "It reaches you through whispers into your context.",
-    );
-    expect(
-      codexAdapter.formatStatus({ ...status, queuedMessages: true }),
-    ).toContain("whispers into your context and queued messages");
-    expect(
-      lettaCodeAdapter.formatStatus({ ...status, whispers: false }),
-    ).toContain("It is observing only; no delivery channel is enabled.");
+  it("uses the same minimal identity for every harness", () => {
+    const expected =
+      '<subconscious_status agent_id="agent-f036ea00-dded-4f58-ab3b-044d2f42f9c5" conversation_id="conv-one" />';
+    expect(claudeCodeAdapter.formatStatus(status)).toBe(expected);
+    expect(codexAdapter.formatStatus(status)).toBe(expected);
+    expect(lettaCodeAdapter.formatStatus(status)).toBe(expected);
   });
 
-  it("falls back to the agent link when no conversation exists yet", () => {
+  it("omits a conversation attribute until one exists", () => {
     const output = claudeCodeAdapter.formatStatus({
       ...status,
       conversationId: null,
     });
-    expect(output).not.toContain("Conversation:");
-    expect(output).toContain(
-      "Supervise: https://app.letta.com/agents/agent-f036ea00-dded-4f58-ab3b-044d2f42f9c5",
+    expect(output).toBe(
+      '<subconscious_status agent_id="agent-f036ea00-dded-4f58-ab3b-044d2f42f9c5" />',
     );
   });
 });

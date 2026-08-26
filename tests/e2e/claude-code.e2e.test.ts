@@ -77,6 +77,7 @@ const silentObserver = {
       conversationId: "conv-observer",
       runIds: ["run-observer"],
     },
+    effectiveModel: null,
   }),
 };
 
@@ -271,6 +272,8 @@ async function runClaude(
       prompt,
       "--session-id",
       active.sessionId,
+      "--setting-sources",
+      "project",
       "--settings",
       settings,
       "--model",

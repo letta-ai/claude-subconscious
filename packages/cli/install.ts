@@ -3,6 +3,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { atomicWriteFile, type KnownHarnessId } from "../core/index.js";
+import { installAdapter as installHermesAdapter } from "./install-hermes.js";
 
 interface CommandHook {
   type: "command";
@@ -107,7 +108,7 @@ function addHook(
         type: "command",
         command,
         timeout: timeoutSeconds(spec) * timeoutMultiplier,
-        ...(spec.event === "Stop" && quiet ? { quiet: true } : {}),
+        ...(quiet ? { quiet: true } : {}),
       },
     ],
   });
@@ -132,6 +133,7 @@ export async function installAdapter(
   harness: KnownHarnessId,
   projectRoot = process.cwd(),
 ): Promise<string> {
+  const env: NodeJS.ProcessEnv = process.env;
   if (harness === "claude-code") {
     return "Install the bundled Claude Code plugin with /plugin install claude-subconscious@claude-subconscious.";
   }
@@ -152,6 +154,23 @@ export async function installAdapter(
       true,
     );
     return `Installed Letta Code hooks in ${path}.`;
+  }
+  if (harness === "hermes") {
+    const result = await installHermesAdapter(harness, env);
+    if (result.allowlist.kind === "malformed") {
+      throw new Error(
+        `${result.allowlistPath} is malformed or unreadable; no hooks were installed. Fix or remove the allowlist file, then rerun subconscious install hermes.`,
+      );
+    }
+    const parts = [
+      result.addedEvents.length > 0
+        ? `Installed Hermes hooks (${result.addedEvents.join(", ")}) in ${result.configPath}.`
+        : `Hermes hooks were already installed in ${result.configPath}.`,
+      result.allowlist.added > 0
+        ? `Seeded ${result.allowlist.added} shell-hook allowlist ${result.allowlist.added === 1 ? "entry" : "entries"} in ${result.allowlistPath}.`
+        : `Allowlist entries already present in ${result.allowlistPath}.`,
+    ];
+    return parts.join("\n");
   }
   throw new Error(`Unsupported harness adapter: ${harness}`);
 }

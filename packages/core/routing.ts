@@ -5,7 +5,6 @@ export interface RouteIdentity {
   configPath: string;
   projectRoot: string;
   agentId: string;
-  model: string;
   harness: HarnessId;
   sessionId: string;
 }

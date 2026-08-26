@@ -1,7 +1,104 @@
-export const HARNESS_IDS = ["claude-code", "codex", "letta-code"] as const;
+import type { ReasoningEffort } from "@letta-ai/letta-agent-sdk";
+
+export const HARNESS_IDS = [
+  "claude-code",
+  "codex",
+  "letta-code",
+  "hermes",
+] as const;
 
 export type KnownHarnessId = (typeof HARNESS_IDS)[number];
 export type HarnessId = KnownHarnessId | (string & {});
+
+/**
+ * Harness keys used by `[model_overrides]` tables in subconscious.toml.
+ *
+ * TOML keys use underscores because TOML bare keys cannot carry hyphens.
+ */
+export const MODEL_OVERRIDE_KEYS = [
+  "claude_code",
+  "codex",
+  "letta_code",
+  "hermes",
+] as const;
+
+export type ModelOverrideKey = (typeof MODEL_OVERRIDE_KEYS)[number];
+
+/** Any value that survives a JSON round trip without loss. */
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+/**
+ * One harness's deviation from the project-wide model.
+ *
+ * `reasoning_effort` rides the Agent SDK session option and re-applies on every
+ * observer turn. `settings` and `context_window_limit` have no session-scoped
+ * path, so the runtime persists them onto the named Subconscious conversation
+ * through the management API. `reasoning_effort` and `settings` are mutually
+ * exclusive because one asks the normalized runtime for a reasoning tier while
+ * the other hands the provider raw settings whose precedence would be unclear.
+ */
+export interface ModelOverride {
+  /** Non-empty model handle. Absent means this table tunes nothing else's model. */
+  model?: string;
+  /** Reasoning tier for the session target. */
+  reasoningEffort?: ReasoningEffort;
+  /** Positive whole-number context window override persisted on the conversation. */
+  contextWindowLimit?: number;
+  /**
+   * Provider-specific model settings persisted on the conversation.
+   *
+   * Values must be JSON-compatible without null: TOML cannot represent null,
+   * and a silent null-to-absent rewrite would make the file lie about what
+   * reaches the provider.
+   */
+  settings?: { [key: string]: JsonValue };
+}
+
+export interface ModelOverridesConfig {
+  claude_code?: ModelOverride;
+  codex?: ModelOverride;
+  letta_code?: ModelOverride;
+  hermes?: ModelOverride;
+}
+
+/** Where the effective observer model came from, in precedence order. */
+export type ModelOverrideSource = "harness" | "project" | "agent_default";
+
+/**
+ * The model decision for one observer turn, after precedence.
+ *
+ * `model` absent means inherit whatever the attached agent default provides;
+ * the session then carries no model option at all.
+ */
+export interface ResolvedModelSelection {
+  source: ModelOverrideSource;
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
+  contextWindowLimit?: number;
+  settings?: { [key: string]: JsonValue };
+}
+
+/**
+ * The conversation-persisted slice of a model selection.
+ *
+ * A `null` clears the corresponding override so the conversation inherits
+ * again. The runtime records what it last ensured server-side so an unchanged
+ * configuration costs no management call on later observations. Reasoning
+ * effort is tracked even though it rides session options: `update_model` can
+ * persist the tier inside the conversation's model settings, so a removed or
+ * changed tier must clear them before the next turn applies its own.
+ */
+export interface AppliedModelState {
+  model?: string | null;
+  modelSettings?: JsonValue | null;
+  contextWindowLimit?: number | null;
+  reasoningEffort?: ReasoningEffort | null;
+}
 
 export type HarnessEventType =
   | "session_start"
@@ -77,7 +174,13 @@ export interface ObserverConfig {
 export interface ProjectConfig {
   version: 1;
   agentId?: string;
-  model: string;
+  /**
+   * The project-wide observer model, applied as a Subconscious-conversation
+   * override. Absent means inherit the attached agent's default.
+   */
+  model?: string;
+  /** Per-harness deviations from `model`. Absent means no harness deviates. */
+  modelOverrides?: ModelOverridesConfig;
   delivery: DeliveryConfig;
   observer: ObserverConfig;
 }
@@ -98,10 +201,12 @@ export interface AdapterCapabilities {
  * How a harness reads context out of a hook.
  *
  * "stdout" takes the text as written. "envelope" requires a JSON object naming
- * the event. Sending the wrong one is silent: the harness drops the output and
- * no context reaches the model.
+ * the event. "context" requires a bare JSON object of the shape
+ * `{"context": "<text>"}` — Hermes' shell-hook contract for `pre_llm_call`,
+ * whose parser accepts no other field there. Sending the wrong one is silent:
+ * the harness drops the output and no context reaches the model.
  */
-export type ContextChannel = "stdout" | "envelope";
+export type ContextChannel = "stdout" | "envelope" | "context";
 
 export interface SourceCursor {
   offset?: number;
@@ -129,7 +234,29 @@ export interface RouteRecord {
   configPath: string;
   projectRoot: string;
   agentId: string;
-  model: string;
+  /**
+   * Legacy configured-model field from before model overrides existed.
+   *
+   * Routes persisted by older versions carry it; it is no longer written.
+   * `requestedModel` and `effectiveModel` are the honest replacements, and a
+   * route without either inherits the attached agent default.
+   */
+  model?: string;
+  /** The model the configuration asks for on this route's turns. Absent means inherit. */
+  requestedModel?: string;
+  /** Which precedence level supplied `requestedModel`. */
+  modelOverrideSource?: ModelOverrideSource;
+  /** Reasoning tier the runtime passes on every observer turn for this route. */
+  reasoningEffort?: ReasoningEffort;
+  /** The model the backend reported for this route's last initialized session. */
+  effectiveModel?: string;
+  /**
+   * The conversation-persisted override triple the runtime last ensured.
+   *
+   * Absent on routes created before overrides existed; the next observation
+   * reconciles those in place with one management call.
+   */
+  appliedModelState?: AppliedModelState;
   harness: HarnessId;
   sessionId: string;
   conversationId: string | null;
@@ -167,7 +294,16 @@ export interface RouteRecord {
  */
 export interface SessionStatus {
   agentId: string;
-  model: string;
+  /**
+   * Legacy configured-model field. Present when a model override or project
+   * model names one; absent means the observer inherits its agent default.
+   */
+  model?: string;
+  /** The model the configuration asks for. Absent means inherit. */
+  requestedModel?: string;
+  modelOverrideSource?: ModelOverrideSource;
+  reasoningEffort?: ReasoningEffort;
+  effectiveModel?: string;
   harness: HarnessId;
   sessionId: string;
   conversationId: string | null;

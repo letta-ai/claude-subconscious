@@ -74,6 +74,7 @@ const silentObserver = {
       conversationId: "conv-observer",
       runIds: ["run-observer"],
     },
+    effectiveModel: null,
   }),
 };
 
@@ -305,7 +306,7 @@ describe("a whisper waiting in the broker", () => {
     });
 
     const context = String(envelope(output).additionalContext);
-    expect(context).toContain("<subconscious_status>");
+    expect(context).toContain("<subconscious_status ");
     expect(context).toContain("agent-whisper");
     expect(context).toContain(active.whisper);
   });

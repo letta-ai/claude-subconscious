@@ -1,7 +1,7 @@
 ---
 id: SPEC-0000
 title: Harness-neutral Subconscious
-status: implemented
+status: implementing
 dependencies: []
 supersedes: []
 implementation_links: []
@@ -21,6 +21,8 @@ Each harness adapter sends observations to the service. A persistent Letta agent
 - The product does not use `@letta-ai/letta-code-sdk` or direct Letta REST requests.
 - The default model is `letta/auto`.
 - Project configuration controls the observer agent, delivery permissions, and optional instructions.
+- Any Letta agent can be attached. Subconscious does not replace its system prompt or seed application-owned behavioral memory.
+- Subconscious behavior is introduced by one session-primer message. Later user messages contain only the new transcript observation.
 - The observer sends user-visible output only through an explicit delivery tool.
 - The service discards ordinary assistant output from the observer.
 - Redaction is an extension point. A general redaction engine is not required for the first implementation.
@@ -90,7 +92,17 @@ The first configuration version has the following shape:
 ```toml
 version = 1
 agent_id = "agent-..."
+# Optional. Absent means inherit the attached agent's default.
 model = "letta/auto"
+
+[model_overrides.claude_code]
+# Optional per-harness refinement. Keys: claude_code, codex, letta_code, hermes.
+model = "anthropic/claude-sonnet-5"
+reasoning_effort = "high"
+context_window_limit = 200000
+
+[model_overrides.claude_code.settings]
+temperature = 0.2
 
 [delivery]
 whispers = true
@@ -118,15 +130,19 @@ A sandboxed session sends no `cwd` and no session `env`. The project root does n
 
 The thresholds are validated whether or not the switch is on, so a typo in a file with the feature off is still reported. A value that is not a whole number in range fails configuration loading and names the key. It does not fall back to the default: a throttle silently reverting to something the file does not say is worse than a startup error.
 
-The CLI can create a dedicated observer agent when `agent_id` is absent. Agent creation uses `model: "letta/auto"`, MemFS, and `baseTools: []`. It does not supply legacy memory block inputs or attach server-side tools.
+The CLI can create a dedicated observer agent when `agent_id` is absent. Agent creation uses `model: "letta/auto"` unless `--model` names another handle, plus MemFS and `baseTools: []`. It does not supply legacy memory block inputs, replace the standard Letta system prompt, or attach server-side tools. Without an explicit `--model`, the written configuration omits `model` entirely: a new observer inherits its own creation default, and a supplied agent keeps whatever it already uses.
 
 The CLI does not attach optional external tools to a new observer agent.
 
-The observer is a context manager. It routes durable project information into MemFS, retrieves context for the active task, and prepares a compact context packet for the next coding-agent turn.
+The Subconscious agent is the Letta agent named by the project. The first message in each observer conversation explains that another agent is using Subconscious, that it is monitoring that agent's transcript, and that it may send guidance when it deems that important. Guidance must contain verified claims; incomplete evidence is stated as uncertainty or left silent. The primer also names available delivery tools, project context, and configured instructions. It does not prescribe an agent-wide identity or memory layout. Later messages contain only an escaped transcript observation, relying on the conversation to retain the one-time primer.
 
 MemFS uses progressive disclosure. Compact facts needed in most turns belong under `system/`. Detailed decisions, explanations, incidents, and history belong under `reference/`. Each file has frontmatter that describes its contents and retrieval trigger. The observer updates or deletes stale information instead of preserving contradictions.
 
-An explicit model changes only conversations that Subconscious owns. Subconscious does not change unrelated conversations or the agent default.
+Agent SDK 0.7.6 applies an explicit project model as an override on the Subconscious conversation. Subconscious does not change unrelated conversations or the supplied agent's default model.
+
+The `model` key is optional. A file without one, and without a matching override table, passes no session model option at all: the observer inherits its agent's default. `[model_overrides.<harness>]` tables refine this per harness with keys `claude_code`, `codex`, and `letta_code`; unknown harness keys fail configuration loading offline. Each table accepts a non-empty `model`, a `reasoning_effort` from the SDK tier set, a positive whole-number `context_window_limit`, and a JSON-compatible `settings` table without null values. `reasoning_effort` and `settings` are mutually exclusive in one table because their precedence over each other would be ambiguous.
+
+Precedence is per harness: the harness override's model, else the project-wide `model`, else inheritance from the attached agent default. Fields an override omits fall back to the lower levels. Configuration loading validates structure only and never touches the network; a handle the backend does not know fails that observation clearly instead.
 
 Two configurations that name the same agent share that agent's memory. Separate agent IDs provide project memory isolation.
 
@@ -200,7 +216,11 @@ The runtime builds that client on the first sandboxed observation, so a project 
 Each session uses the following rules:
 
 - Set `cwd` to the resolved project root. A sandboxed session sends no `cwd` and no `env`.
-- Set the model to the project model. The default is `letta/auto`.
+- Apply the resolved model selection: the harness override wins over the project model, and silence at both levels sends no `model` option so the conversation inherits the agent default.
+- Pass `reasoningEffort` as a session option when the override names one; it re-applies on every turn through the same scoped path as `model`.
+- Persist raw `settings` and `context_window_limit` onto the named Subconscious conversation through the management API, because they have no session-scoped route. An existing conversation is reconciled with `conversations.update` before the session opens, only when its recorded state differs from what the file now asks for; a removed override or a changed or removed reasoning effort sends explicit nulls to clear back to inheritance, since `update_model` can persist a tier inside the conversation settings.
+- Never apply any of this outside a named Subconscious conversation, never on the supplied agent's default conversation, and never on the observed-agent queue delivery session.
+- Initialize each session with `session.ready()` instead of fetching transcript history, and record the effective backend model it reports.
 - Disable skill loading with `skillSources: []`.
 - Disable automatic dreaming with `dreaming: { trigger: "off" }`.
 - Set `toolset: { base: "none", include: bundledTools }`. The bundled list contains only read tools and `memory_apply_patch`. Letta Code scopes `memory_apply_patch` to the observer's MemFS repository.
@@ -210,7 +230,7 @@ Each session uses the following rules:
 - Require a successful terminal `result` before the event cursor advances.
 - Close the session after the turn.
 
-The first observation for a harness session uses `createSession(agentId, options)`. The broker stores the returned conversation ID.
+The first observation for a harness session creates the named observer conversation explicitly with `conversations.create({ agentId, hidden: true, ...overrides })`, carrying every persistent override - or none of them when the file asks for pure inheritance - and then opens it with `resumeSession(conversation.id, options)`. The conversation therefore exists in its exact requested configuration before `ready()` initializes the first turn. The broker stores the returned conversation ID.
 
 Later observations for that harness session use `resumeSession(conversationId, options)`. Closing the session object does not delete the Letta conversation.
 
@@ -241,11 +261,11 @@ The tool closes over the harness route that caused the observer turn. The model 
 
 The tool stores the pending delivery before it returns success. The adapter acknowledges the delivery after it injects the context.
 
-A whisper enters model context at the start of the next supported harness turn. It does not interrupt an active turn.
+A whisper enters model context at the next supported harness boundary. Depending on the harness, that may be later in the current turn or on the next turn.
 
 ### `queue_message`
 
-`queue_message` adds an actionable message that starts a new coding-agent turn.
+`queue_message` adds an actionable message that starts a new observed-agent turn.
 
 ```ts
 interface QueueMessageInput {
@@ -264,9 +284,9 @@ A queued message does not wait for a hook. A hook runs at a turn boundary the ha
 
 A harness that runs as a Letta agent exposes its own Letta agent and conversation IDs on each event. Those IDs belong to the coding agent, never to the observer, and the broker records them on the route separately from the observer's agent and conversation. The broker sends the message into that conversation with the Agent SDK. The message is in the coding agent's context from its next turn onward.
 
-The delivery session carries no model and no client tools. A model would rewrite the coding agent's own configuration, and a client tool would make the broker process a device that executes the coding agent's tool calls.
+The delivery session carries no model, no reasoning effort, no dreaming settings, and no client tools. A model or tier would rewrite the coding agent's own configuration, dreaming is applied persistently with scope both and would replace the agent's own reflection settings, and a client tool would make the broker process a device that executes the coding agent's tool calls. Sends into one observed agent's conversation are serialized per conversation, and a delivery whose record is already in flight joins that send instead of opening a second session for it.
 
-The broker acknowledges a queued message itself, because no hook is present to acknowledge it. The delivery ID travels as the send OTID, so a retry after an unknown transport result deduplicates instead of posting the message twice.
+The broker acknowledges a queued message itself, because no hook is present to acknowledge it. Agent SDK `send()` alone is not proof of persistence: the broker keeps the delivery session open, drains its stream, and requires a successful terminal result before acknowledgement. A missing or failed terminal result keeps the delivery pending. The delivery ID travels as the send OTID, so a retry after an unknown transport result deduplicates instead of posting the message twice.
 
 If the conversation no longer belongs to the observed agent, the delivery is stale. It is never redirected into a replacement session. A transport failure leaves it pending with the reason recorded, and the next observer turn or broker start retries it.
 
@@ -278,7 +298,7 @@ Each delivery has a stable ID. Delivery is at least once. A crash after harness 
 
 A whisper waits for the next harness delivery window. A queued message does not wait at all: the broker sends it as soon as the observer turn that produced it finishes.
 
-The observer prompt permits a delivery when stored or newly learned context can help the next turn. Useful context includes:
+The session primer permits delivery when the Subconscious agent deems guidance important. Useful context includes:
 
 - The user or harness addresses the observer directly.
 - Project decisions and constraints related to the active task.
@@ -293,7 +313,7 @@ Observation processing remains nonblocking. Context prepared from one observatio
 
 Install and start-up banners go to the terminal, so the harness never learns which Subconscious is attached to it. The assistant therefore cannot answer a question as basic as "which agent is watching this session?" without reading configuration files.
 
-The broker exposes the session identity once per route: agent ID, model, harness, project root, conversation, and the delivery channels the project enables. The hook claims it at the same prompt boundary as whispers and the adapter renders it as `<subconscious_status>`.
+The broker exposes a minimal session identity once per route: the Subconscious agent ID and conversation ID. The hook claims it at the same prompt boundary as whispers and the adapter renders one compact `<subconscious_status ... />` element.
 
 The claim is atomic. Two hooks racing on one session produce one banner, and a route that has already surrendered its status returns nothing.
 
@@ -400,6 +420,18 @@ The adapter does not observe tool boundaries. Its completed-turn observation is 
 
 A Letta Code session is a Letta agent in a Letta conversation, so `queue_message` needs no harness queue API. The adapter reports the coding agent's agent and conversation IDs from hook input, and the broker writes the message into that conversation through the Agent SDK. Claude Code and Codex are foreign harnesses whose hooks cannot start a turn, so they keep `queue_message` disabled.
 
+### Hermes
+
+Hermes 0.20.5 exposes config-driven shell hooks whose payloads carry `session_id`, the process `cwd`, and event-specific fields under `extra`. The adapter observes four events: `on_session_start`, `pre_llm_call`, `post_tool_call`, and `on_session_end`. Despite its name, `on_session_end` fires at the end of every turn, so it is the turn-stop boundary; tool failure is read from `post_tool_call`'s `status` field rather than a separate event.
+
+Only `pre_llm_call` consumes hook output, on the bare `{"context": "..."}` shape, and it fires once per turn prologue. It is therefore both the prompt observation and the only whisper window: Hermes whispers are next-turn-only, and no mid-turn boundary can carry one. `post_tool_call` is registered as an observation-only boundary with no claimed channel, because its stdout is discarded at the fire site; registering it while claiming nothing is the honest statement of that asymmetry.
+
+The canonical transcript is the SQLite store `<hermes-home>/state.db`, table `messages`; Hermes 0.20.5 has no live writer of per-session JSONL files. The adapter reads it through Node's built-in `node:sqlite` opened read-only, lazily imported so non-Hermes hooks never load it. The autoincrement row id is the cursor, paging is explicit (a backlog beyond one page reports truncation and finishes at the next boundary), and a cursor above the session's own maximum id — meaning the store was pruned or replaced — resets to replay that session instead of hanging forever.
+
+Because one global broker may have been started by any harness, the broker's environment proves nothing about which Hermes profile owns an event. The hook subprocess stamps its resolved HERMES_HOME into every payload, and every later transcript read uses that per-event path. Profile resolution mirrors upstream `_apply_profile_override`: a HERMES_HOME whose immediate parent is named `profiles` is final; any other value still follows `<root>/active_profile`.
+
+The installer edits the active profile's `config.yaml` textually so user comments survive byte-for-byte, deduplicates per `(event, exact command)` so unrelated hooks on the same event are preserved, refuses flow-shaped `hooks:` blocks rather than corrupting them, and seeds exactly the four consent allowlist entries in `shell-hooks-allowlist.json` without touching `hooks_auto_accept`. A malformed or unreadable allowlist is reported, never overwritten. Capabilities: passive context yes, queued messages no, transcript file.
+
 ## Durable state
 
 The broker stores the following state:
@@ -492,10 +524,22 @@ The CLI provides the following commands:
 - [x] Production code contains no direct `/v1/` Letta requests.
 - [x] New observer agents use `letta/auto` and MemFS.
 - [x] New observer agents do not create or attach legacy memory blocks.
-- [x] The observer prompt routes durable information into MemFS and retrieves relevant context for the active task.
+- [x] New observer agents keep the standard Letta system prompt.
+- [x] Any existing Letta agent can be attached without changing its system prompt or default model.
+- [x] A configuration without a `model` key loads, and the runtime sends no session model option for it.
+- [x] Per-harness override tables parse, validate offline against the known harness keys and value shapes, and round-trip through the formatter.
+- [x] Precedence resolves per harness: harness override above project `model` above agent-default inheritance.
+- [x] The runtime creates each fresh observer conversation with its full override payload through `conversations.create`, then resumes it by conversation ID before the first turn.
+- [x] The runtime persists raw settings and context-window overrides onto the named Subconscious conversation with `conversations.update` and clears them back to inheritance when the file stops naming them, including a reasoning tier left persisted by a previous turn.
+- [x] A changed override updates the existing conversation in place; no route key or conversation is forked by a model change.
+- [x] The queue delivery session carries neither a model nor a reasoning effort nor any persisted override.
+- [x] The session primer lists only delivery tools available for that session and never instructs the agent to call a missing tool.
+- [x] Observation and project-instruction text are escaped inside explicit data boundaries.
+- [x] The first observer-conversation message primes the Subconscious role without forcing a delivery.
+- [x] Later messages contain only the new transcript observation and do not repeat the primer, tool explanation, project root, or project instructions.
 - [x] The observer prepares context for the next safe prompt boundary without blocking the current turn.
-- [x] A live turn proves that the observer can read a configured project file through the local App Server.
-- [x] A live turn proves that custom delivery tools execute in the broker process.
+- [x] `tests/e2e/local-tools.e2e.test.ts` proves in a live turn that the observer can read a configured project file through the local App Server.
+- [x] `tests/e2e/local-tools.e2e.test.ts` proves in the same live turn that custom delivery tools execute in the broker process.
 - [x] The runtime drains and checks the terminal `result` for every observation.
 - [x] The runtime uses `toolset: { base: "none" }`, includes only bundled observer tools, and passes the complete bundled-plus-custom `allowedTools` list separately.
 - [x] The client tool allowlist excludes shell, project mutation, delegation, interactive, and worktree tools.
@@ -505,7 +549,7 @@ The CLI provides the following commands:
 - [x] A sandboxed project opens its session through the Cloud sandbox client and sends neither `cwd` nor session `env`.
 - [x] A sandboxed session keeps the MemFS read tools and the broker-process delivery tools.
 - [x] The observation prompt tells a sandboxed observer that the project root is not readable.
-- [x] The observation prompt tells a mid-turn observer that the coding agent is still working, and raises the delivery bar rather than lowering it.
+- [x] Mid-turn transcript observations use the same minimal data boundary as every other post-primer observation.
 - [ ] A live turn proves that a sandboxed observer reads MemFS and delivers a whisper from the broker process.
 
 ### Delivery
@@ -519,12 +563,12 @@ The CLI provides the following commands:
 - [x] Tests cover a crash after harness injection but before acknowledgement by reusing the same delivery ID.
 - [x] A stale native session or active-turn ID never redirects a delivery to a replacement session.
 - [x] `queue_message` reaches a Letta Code conversation through the Agent SDK without a hook lease.
-- [x] The broker acknowledges a directly delivered queued message itself.
+- [x] The broker drains a directly delivered queued-message turn and acknowledges it only after a successful terminal result.
 - [x] A queued message whose conversation changed owner is stale and is not redirected.
 - [x] A failed direct delivery stays pending, records the reason, and is retried after a broker restart.
 - [x] A project that has not set `queue_messages = true` sends nothing.
-- [ ] A live turn proves that a queued message reaches a running Letta Code conversation.
-- [x] The session status reaches the harness once per route and reports the agent, model, and delivery channels.
+- [x] A live turn proves that a queued message reaches a running Letta Code conversation.
+- [x] The session status reaches the harness once per route as one compact identity element.
 - [x] A second status claim on the same route returns nothing.
 - [x] A real `claude` process reads a whisper back verbatim, at a prompt boundary and at a tool boundary, and the session transcript names the boundary that carried it.
 - [x] A whisper whose only registered boundary is one Claude Code discards stays pending, proven against a real `claude` process.
@@ -569,7 +613,9 @@ The CLI provides the following commands:
 - [x] Tests cover two projects with different configurations under one parent directory.
 - [x] Tests cover two harness sessions that share one observer agent.
 - [x] Tests prove that shared-agent turns serialize against one MemFS repository.
-- [x] A live acceptance test uses `letta/auto` and verifies the exact conversation route.
+- [x] A live acceptance test uses `letta/auto` and verifies the exact conversation route without changing the supplied agent's default model.
+- [x] The runtime initializes sessions with `session.ready()` and records the effective backend model on the route instead of fetching transcript history.
+- [x] Route and status data report the requested model, its source (`harness`, `project`, or `agent_default`), the reasoning effort, and the effective model, while the injected session status element stays compact.
 - [x] The repository's full check command validates specs, types, formatting, tests, and package contents.
 - [x] The end-to-end suite runs from its own command, and fails rather than skips when the `claude` binary or the build is missing.
 

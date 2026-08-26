@@ -26,6 +26,7 @@ describe("explicit delivery tools", () => {
       status: "pending",
       text: "Check the migration order.",
     });
+    expect(tool?.description).toContain("current turn or on the next turn");
   });
 
   it("omits queue_message when the adapter has no queue", () => {

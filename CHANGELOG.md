@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-harness model overrides through `[model_overrides.claude_code]`, `[model_overrides.codex]`, `[model_overrides.letta_code]`, and `[model_overrides.hermes]` tables, each accepting `model`, `reasoning_effort`, `context_window_limit`, and provider `settings`. Precedence is harness override, then the project-wide `model`, then the attached agent's default. Values are validated offline, including safe-integer bounds so every accepted number survives a lossless round trip.
+- Added a Hermes adapter (`subconscious install hermes`). It observes `on_session_start`, `pre_llm_call` (prompt boundary), `post_tool_call` (tool success/failure from `status`), and `on_session_end` (per-turn stop despite the name). Whispers are delivered only at the next turn's `pre_llm_call` through Hermes' bare `{"context": "..."}` contract — Hermes has no mid-turn context window, so guidance waits for the next turn. Transcript deltas come read-only from the active profile's `state.db` via `node:sqlite`, with the message row id as cursor, explicit 400-row paging, and session-scoped reset when the store is pruned underneath a route. The hook stamps its resolved HERMES_HOME into every payload so a globally shared broker always reads the right profile's store. The installer edits `config.yaml` comment-preserving and idempotently (dedupe per event plus exact command, unrelated hooks untouched, flow-shaped `hooks:` refused rather than corrupted) and seeds exactly the four shell-hook consent allowlist entries without flipping `hooks_auto_accept`; malformed or unreadable allowlists are reported, never overwritten.
+- Made the top-level `model` key optional. A file without one inherits the attached agent's default; `subconscious init` without `--model` now writes no model line and creates new observers on `letta/auto`. Both `--model` and `--agent` now require a non-empty value and reject flag-like placeholders.
+- A fresh observer conversation is created explicitly with its full override payload before its first turn, and later turns reconcile model, settings, context-window overrides, and reasoning-effort changes onto that same conversation in place, clearing them back to inheritance when the file stops naming them. A model change never forks a route or conversation.
+- Route records, session status, and CLI status output now report the requested model, its source (`harness`, `project`, or `agent_default`), the reasoning effort, and the effective backend model for each turn; a turn whose backend reports no model clears the recorded value instead of keeping stale data. Human-readable detail output shows the same decision per route.
+- Queued-message delivery sessions carry no model, no reasoning effort, and no dreaming settings, and sends into one observed agent's conversation are serialized so recovery and normal draining cannot race on one record.
+- Added `npm run test:model-e2e`, an opt-in live suite that proves the override pipeline against the real Agent SDK: overrides land on a fresh conversation, clearing them restores inheritance in place, and the disposable observer is deleted even on failure.
+
 ### Changed
 
 - Replaced the Claude-specific worker with one harness-neutral broker for Claude Code, Codex, and Letta Code.
@@ -12,8 +22,13 @@
 - Removed automatic relay of observer assistant text and the `PreToolUse` polling hook.
 - Added durable event deduplication, conversation routes, delivery acknowledgements, and ambiguous-send reconciliation state.
 - Added OTID lookup and explicit retry or discard controls for interrupted observer turns.
+- Moved Subconscious behavior from an agent-wide system prompt into a one-time session primer, followed by transcript-only observations, so any Letta agent can be attached without rewriting its design or repeating instructions every turn.
+- Updated to Agent SDK 0.7.6 and kept project model selection scoped to the observer conversation. Session initialization now uses `session.ready()` instead of fetching transcript history.
+- Reduced the injected session identity to one compact XML element.
 
 ### Fixed
+
+- Kept direct Letta Code `queue_message` sessions open through a successful terminal result. Closing immediately after Agent SDK `send()` could mark a message delivered even though the turn and message were dropped.
 
 - **Deprecated `llm_config` PATCH shape** — `updateAgentModel()` was sending `{ llm_config: {...} }` as the agent PATCH body. Letta now rejects that with HTTP 400 ("The `llm_config` field is deprecated and no longer accepted. Use the `model` field instead."). The session-start model/context-window sync therefore failed silently on every Claude Code launch, leaving `LETTA_MODEL` / `LETTA_CONTEXT_WINDOW` env overrides un-applied — agents stayed pinned to whatever they last had server-side. Switched to the new top-level `model` + `context_window_limit` shape.
 

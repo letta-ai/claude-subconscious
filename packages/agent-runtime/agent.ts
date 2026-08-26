@@ -1,6 +1,5 @@
 import { LettaAgentClient } from "@letta-ai/letta-agent-sdk";
 import { DEFAULT_MODEL } from "../core/index.js";
-import { OBSERVER_SYSTEM_PROMPT } from "./prompt.js";
 
 export interface CreateObserverAgentOptions {
   apiKey: string;
@@ -22,7 +21,6 @@ export async function createObserverAgent(
     description: "Quiet observer for coding-agent sessions.",
     hidden: true,
     model: options.model ?? DEFAULT_MODEL,
-    systemPrompt: OBSERVER_SYSTEM_PROMPT,
     tags: ["origin:subconscious"],
     memfs: true,
     baseTools: [],

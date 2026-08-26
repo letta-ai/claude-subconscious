@@ -23,14 +23,13 @@ function route(conversationId: string | null = null): RouteRecord {
 
 function observerSession() {
   return {
-    send: vi.fn(async () => {}),
+    send: vi.fn(async (_message: string, _options?: { otid: string }) => {}),
     close: vi.fn(),
     conversationId: "conv-observer",
-    bootstrapState: vi.fn(async () => ({
+    ready: vi.fn(async () => ({
       agentId: "agent-observer",
       model: "letta/auto",
       conversationId: "conv-observer",
-      messages: [],
     })),
     async *stream() {
       yield {
@@ -51,13 +50,16 @@ function observerSession() {
 function recordingClient(session: ReturnType<typeof observerSession>) {
   const captured: { options?: LettaCodeClientSessionOptions } = {};
   const client = {
-    createSession: vi.fn(
-      (_agentId: string, options: LettaCodeClientSessionOptions) => {
+    conversations: {
+      create: vi.fn(async () => ({ id: "conv-observer", hidden: true })),
+      update: vi.fn(async () => ({})),
+    },
+    resumeSession: vi.fn(
+      (_conversationId: string, options: LettaCodeClientSessionOptions) => {
         captured.options = options;
         return session;
       },
     ),
-    resumeSession: vi.fn(),
     agents: { retrieve: vi.fn(async () => ({ tools: [] })) },
   };
   return { client, captured };
@@ -104,12 +106,11 @@ describe("Agent SDK runtime", () => {
       send,
       close,
       conversationId: "conv-observer",
-      bootstrapState: vi.fn(async () => ({
+      ready: vi.fn(async () => ({
         agentId: "agent-observer",
         model: "letta/auto",
         conversationId: "conv-observer",
         tools: ["Read", "send_whisper"],
-        messages: [],
       })),
       async *stream() {
         yield {
@@ -127,14 +128,21 @@ describe("Agent SDK runtime", () => {
       },
     };
     let sessionOptions: LettaCodeClientSessionOptions | undefined;
+    let createdPayload: Record<string, unknown> | undefined;
     const client = {
-      createSession: vi.fn(
-        (_agentId: string, options: LettaCodeClientSessionOptions) => {
+      conversations: {
+        create: vi.fn(async (payload: Record<string, unknown>) => {
+          createdPayload = payload;
+          return { id: "conv-observer", hidden: true };
+        }),
+        update: vi.fn(async () => ({})),
+      },
+      resumeSession: vi.fn(
+        (_conversationId: string, options: LettaCodeClientSessionOptions) => {
           sessionOptions = options;
           return session;
         },
       ),
-      resumeSession: vi.fn(),
       agents: {
         retrieve: vi.fn(async () => ({ tools: [{ name: "memory" }] })),
       },
@@ -202,11 +210,10 @@ describe("Agent SDK runtime", () => {
       send: async () => {},
       close: () => {},
       conversationId: "conv-observer",
-      bootstrapState: async () => ({
+      ready: async () => ({
         agentId: "agent-observer",
         model: "letta/auto",
         conversationId: "conv-observer",
-        messages: [],
       }),
       async *stream(): AsyncGenerator<never> {
         throw new Error("connection lost");
@@ -216,6 +223,7 @@ describe("Agent SDK runtime", () => {
       createSession: () => session,
       resumeSession: () => session,
       agents: { retrieve: async () => ({ tools: [] }) },
+      conversations: { update: async () => ({}) },
     } as unknown as LettaAgentClient;
     const runtime = new AgentRuntime({ apiKey: "test-key", client });
     const result = await runtime.run({
@@ -257,11 +265,10 @@ describe("Agent SDK runtime", () => {
       },
       close: () => {},
       conversationId: "conv-observer",
-      bootstrapState: async () => ({
+      ready: async () => ({
         agentId: "agent-observer",
         model: "letta/auto",
         conversationId: "conv-observer",
-        messages: [],
       }),
       async *stream(): AsyncGenerator<never> {},
     };
@@ -269,6 +276,7 @@ describe("Agent SDK runtime", () => {
       createSession: () => session,
       resumeSession: () => session,
       agents: { retrieve: async () => ({ tools: [] }) },
+      conversations: { update: async () => ({}) },
     } as unknown as LettaAgentClient;
     const runtime = new AgentRuntime({ apiKey: "test-key", client });
     const result = await runtime.run({
@@ -306,8 +314,11 @@ describe("Agent SDK runtime", () => {
 
   it("classifies a synchronous session-construction failure", async () => {
     const client = {
-      createSession: () => {
-        throw new Error("invalid conversation setup");
+      conversations: {
+        create: () => {
+          throw new Error("invalid conversation setup");
+        },
+        update: async () => ({}),
       },
       resumeSession: () => {
         throw new Error("invalid conversation setup");
@@ -360,9 +371,543 @@ describe("Agent SDK runtime", () => {
     const result = await runtime.run(observation(projectConfig(false)));
 
     expect(result.status).toBe("success");
-    expect(sandbox.client.createSession).not.toHaveBeenCalled();
+    expect(sandbox.client.conversations.create).not.toHaveBeenCalled();
     expect(local.captured.options?.cwd).toBe("/project");
     expect(local.captured.options?.env).toEqual({ LETTA_API_KEY: "test-key" });
+  });
+
+  it("applies the project model to the observer conversation", async () => {
+    const local = recordingClient(observerSession());
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+    const input = observation({
+      ...projectConfig(false),
+      model: "anthropic/claude-sonnet-4-5",
+    });
+    input.route = route("conv-observer");
+
+    const result = await runtime.run(input);
+
+    expect(result.status).toBe("success");
+    expect(local.client.resumeSession).toHaveBeenCalledWith(
+      "conv-observer",
+      expect.anything(),
+    );
+    expect(local.captured.options?.model).toBe("anthropic/claude-sonnet-4-5");
+  });
+
+  it("prefers the harness override over the project model", async () => {
+    const local = recordingClient(observerSession());
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+    const config = {
+      ...projectConfig(false),
+      model: "letta/auto",
+      modelOverrides: {
+        claude_code: {
+          model: "anthropic/claude-sonnet-5",
+          reasoningEffort: "high" as const,
+        },
+      },
+    };
+    const result = await runtime.run(observation(config));
+
+    expect(local.captured.options?.model).toBe("anthropic/claude-sonnet-5");
+    expect(local.captured.options?.reasoningEffort).toBe("high");
+  });
+
+  it("inherits the agent default when no level names a model", async () => {
+    const session = observerSession();
+    session.ready.mockImplementation(async () => ({
+      agentId: "agent-observer",
+      model: "anthropic/claude-opus-4-6",
+      conversationId: "conv-observer",
+    }));
+    const local = recordingClient(session);
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+    const input = observation({
+      version: 1,
+      agentId: "agent-observer",
+      delivery: { whispers: true, queueMessages: false },
+      observer: {},
+    });
+    input.route = route("conv-observer");
+
+    const result = await runtime.run(input);
+
+    expect(result.status).toBe("success");
+    expect(local.captured.options?.model).toBeUndefined();
+    expect(local.captured.options?.reasoningEffort).toBeUndefined();
+    // Inheritance is honest in both directions: the route reports where the
+    // model came from and what the backend actually resolved.
+    expect(result.status === "success" && result.effectiveModel).toBe(
+      "anthropic/claude-opus-4-6",
+    );
+  });
+
+  it("reconciles a changed override onto an existing conversation before opening it", async () => {
+    const local = recordingClient(observerSession());
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+    const input = observation({
+      ...projectConfig(false),
+      modelOverrides: {
+        claude_code: {
+          model: "openai/gpt-5.2",
+          contextWindowLimit: 200000,
+          settings: { temperature: 0.2 },
+        },
+      },
+    });
+    input.route = {
+      ...route("conv-observer"),
+      appliedModelState: {
+        model: null,
+        modelSettings: null,
+        contextWindowLimit: null,
+      },
+    };
+
+    const result = await runtime.run(input);
+
+    expect(result.status).toBe("success");
+    expect(local.client.conversations.update).toHaveBeenCalledWith(
+      "conv-observer",
+      {
+        model: "openai/gpt-5.2",
+        contextWindowLimit: 200000,
+        modelSettings: { temperature: 0.2 },
+      },
+    );
+    // The management call lands before the session opens so the turn itself
+    // runs on the state the file asked for.
+    expect(
+      local.client.conversations.update.mock.invocationCallOrder[0],
+    ).toBeLessThan(local.client.resumeSession.mock.invocationCallOrder[0]);
+    expect(result.status === "success" && result.appliedModelState).toEqual({
+      model: "openai/gpt-5.2",
+      contextWindowLimit: 200000,
+      modelSettings: { temperature: 0.2 },
+      reasoningEffort: null,
+    });
+  });
+
+  it("skips reconciliation when the persisted override already matches", async () => {
+    const local = recordingClient(observerSession());
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+    const input = observation(projectConfig(false));
+    input.route = {
+      ...route("conv-observer"),
+      appliedModelState: {
+        model: "letta/auto",
+        modelSettings: null,
+        contextWindowLimit: null,
+      },
+    };
+
+    await runtime.run(input);
+
+    expect(local.client.conversations.update).not.toHaveBeenCalled();
+  });
+
+  it("clears a removed override back to inheritance on an existing conversation", async () => {
+    const local = recordingClient(observerSession());
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+    const input = observation({
+      version: 1,
+      agentId: "agent-observer",
+      delivery: { whispers: true, queueMessages: false },
+      observer: {},
+    });
+    input.route = {
+      ...route("conv-observer"),
+      appliedModelState: {
+        model: "anthropic/claude-sonnet-5",
+        modelSettings: { temperature: 0.2 },
+        contextWindowLimit: 200000,
+      },
+    };
+
+    const result = await runtime.run(input);
+
+    expect(result.status).toBe("success");
+    expect(local.captured.options?.model).toBeUndefined();
+    expect(local.client.conversations.update).toHaveBeenCalledWith(
+      "conv-observer",
+      { model: null, contextWindowLimit: null, modelSettings: null },
+    );
+  });
+
+  it("reconciles when only a nested setting changes", async () => {
+    const local = recordingClient(observerSession());
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+    const input = observation({
+      ...projectConfig(false),
+      modelOverrides: {
+        claude_code: {
+          model: "openai/gpt-5.2",
+          settings: {
+            temperature: 0.2,
+            thinking: { type: "enabled", budget_tokens: 1024 },
+          },
+        },
+      },
+    });
+    input.route = {
+      ...route("conv-observer"),
+      appliedModelState: {
+        model: "openai/gpt-5.2",
+        contextWindowLimit: null,
+        reasoningEffort: null,
+        modelSettings: {
+          temperature: 0.2,
+          thinking: { type: "enabled", budget_tokens: 2048 },
+        },
+      },
+    };
+
+    const result = await runtime.run(input);
+
+    // A replacer-array comparison would call these two trees equal and skip
+    // the update; the nested budget change must reconcile.
+    expect(result.status).toBe("success");
+    expect(local.client.conversations.update).toHaveBeenCalledWith(
+      "conv-observer",
+      {
+        model: "openai/gpt-5.2",
+        contextWindowLimit: null,
+        modelSettings: {
+          temperature: 0.2,
+          thinking: { type: "enabled", budget_tokens: 1024 },
+        },
+      },
+    );
+  });
+
+  it("ignores key-order differences inside settings", async () => {
+    const local = recordingClient(observerSession());
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+    const input = observation({
+      ...projectConfig(false),
+      modelOverrides: {
+        claude_code: {
+          model: "openai/gpt-5.2",
+          settings: {
+            temperature: 0.2,
+            thinking: { budget_tokens: 2048, type: "enabled" },
+          },
+        },
+      },
+    });
+    input.route = {
+      ...route("conv-observer"),
+      appliedModelState: {
+        model: "openai/gpt-5.2",
+        contextWindowLimit: null,
+        reasoningEffort: null,
+        // Same tree, different key order at both depths.
+        modelSettings: {
+          thinking: { type: "enabled", budget_tokens: 2048 },
+          temperature: 0.2,
+        },
+      },
+    };
+
+    await runtime.run(input);
+
+    expect(local.client.conversations.update).not.toHaveBeenCalled();
+  });
+
+  it("clears a persisted reasoning tier when the override is removed", async () => {
+    const session = observerSession();
+    const local = recordingClient(session);
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+    const input = observation(projectConfig(false));
+    input.route = {
+      ...route("conv-observer"),
+      appliedModelState: {
+        model: "letta/auto",
+        modelSettings: null,
+        contextWindowLimit: null,
+        reasoningEffort: "high",
+      },
+    };
+
+    const result = await runtime.run(input);
+
+    expect(result.status).toBe("success");
+    // The stale high tier can persist inside the conversation's model
+    // settings, so the reconciliation clears them before ready() applies the
+    // session's own - absent - effort.
+    expect(local.client.conversations.update).toHaveBeenCalledWith(
+      "conv-observer",
+      {
+        model: "letta/auto",
+        contextWindowLimit: null,
+        modelSettings: null,
+      },
+    );
+    expect(local.captured.options?.reasoningEffort).toBeUndefined();
+    expect(result.status === "success" && result.appliedModelState).toEqual({
+      model: "letta/auto",
+      modelSettings: null,
+      contextWindowLimit: null,
+      reasoningEffort: null,
+    });
+  });
+
+  it("clears the old tier before applying a changed reasoning effort", async () => {
+    const session = observerSession();
+    const local = recordingClient(session);
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+    const input = observation({
+      ...projectConfig(false),
+      modelOverrides: { claude_code: { reasoningEffort: "medium" } },
+    });
+    input.route = {
+      ...route("conv-observer"),
+      appliedModelState: {
+        model: "letta/auto",
+        modelSettings: null,
+        contextWindowLimit: null,
+        reasoningEffort: "high",
+      },
+    };
+
+    const result = await runtime.run(input);
+
+    expect(result.status).toBe("success");
+    expect(local.client.conversations.update).toHaveBeenCalledWith(
+      "conv-observer",
+      {
+        model: "letta/auto",
+        contextWindowLimit: null,
+        modelSettings: null,
+      },
+    );
+    // The cleared conversation settings cannot outvote the session's new tier.
+    const updateOrder =
+      local.client.conversations.update.mock.invocationCallOrder[0];
+    expect(updateOrder).toBeLessThan(
+      local.client.resumeSession.mock.invocationCallOrder[0],
+    );
+    expect(updateOrder).toBeLessThan(session.ready.mock.invocationCallOrder[0]);
+    expect(local.captured.options?.reasoningEffort).toBe("medium");
+    expect(result.status === "success" && result.appliedModelState).toEqual({
+      model: "letta/auto",
+      modelSettings: null,
+      contextWindowLimit: null,
+      reasoningEffort: "medium",
+    });
+  });
+
+  it("reconciles a legacy route that never recorded applied state", async () => {
+    const session = observerSession();
+    session.ready.mockImplementation(
+      async () =>
+        ({
+          agentId: "agent-observer",
+          model: undefined,
+          conversationId: "conv-observer",
+        }) as unknown as Awaited<ReturnType<typeof session.ready>>,
+    );
+    const local = recordingClient(session);
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+    const input = observation(projectConfig(false));
+    // Written by a build that predated overrides: the bare model field, no
+    // recorded applied state.
+    input.route = { ...route("conv-observer"), model: "letta/auto" };
+
+    const result = await runtime.run(input);
+
+    expect(result.status).toBe("success");
+    expect(local.client.conversations.update).toHaveBeenCalledWith(
+      "conv-observer",
+      {
+        model: "letta/auto",
+        contextWindowLimit: null,
+        modelSettings: null,
+      },
+    );
+    expect(result.status === "success" && result.appliedModelState).toEqual({
+      model: "letta/auto",
+      modelSettings: null,
+      contextWindowLimit: null,
+      reasoningEffort: null,
+    });
+    // The backend reported no model this turn, so the route must record the
+    // absence instead of keeping any earlier value.
+    expect(
+      result.status === "success" ? result.effectiveModel : undefined,
+    ).toBeNull();
+  });
+
+  it("creates a fresh conversation with its full override payload before resuming it", async () => {
+    const session = observerSession();
+    const local = recordingClient(session);
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+    const input = observation({
+      ...projectConfig(false),
+      modelOverrides: {
+        claude_code: {
+          model: "anthropic/claude-sonnet-5",
+          contextWindowLimit: 128000,
+          settings: { temperature: 0.1 },
+        },
+      },
+    });
+
+    await runtime.run(input);
+
+    // The conversation is born with every persistent override already on it,
+    // so the first turn cannot run on a configuration that a post-hoc patch
+    // would have missed.
+    expect(local.client.conversations.create).toHaveBeenCalledWith({
+      agentId: "agent-observer",
+      hidden: true,
+      model: "anthropic/claude-sonnet-5",
+      contextWindowLimit: 128000,
+      modelSettings: { temperature: 0.1 },
+    });
+    expect(local.client.conversations.update).not.toHaveBeenCalled();
+    expect(local.client.resumeSession).toHaveBeenCalledWith(
+      "conv-observer",
+      expect.anything(),
+    );
+    // Creation strictly precedes resume, which strictly precedes ready and
+    // the first send.
+    const createOrder =
+      local.client.conversations.create.mock.invocationCallOrder[0];
+    expect(createOrder).toBeLessThan(
+      local.client.resumeSession.mock.invocationCallOrder[0],
+    );
+    expect(createOrder).toBeLessThan(session.ready.mock.invocationCallOrder[0]);
+    expect(createOrder).toBeLessThan(session.send.mock.invocationCallOrder[0]);
+  });
+
+  it("creates an inheritance-only conversation without any model fields", async () => {
+    const local = recordingClient(observerSession());
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+
+    const result = await runtime.run(
+      observation({
+        version: 1,
+        agentId: "agent-observer",
+        delivery: { whispers: true, queueMessages: false },
+        observer: {},
+      }),
+    );
+
+    expect(result.status).toBe("success");
+    // No level names a model, so nothing is requested on creation and the
+    // conversation inherits whatever the agent defaults to.
+    expect(local.client.conversations.create).toHaveBeenCalledWith({
+      agentId: "agent-observer",
+      hidden: true,
+    });
+    expect(local.captured.options?.model).toBeUndefined();
+    expect(local.captured.options?.reasoningEffort).toBeUndefined();
+    // Every turn resumes by conversation ID; the agent default conversation is
+    // never opened.
+    expect(local.client.resumeSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a failed override reconciliation before anything is sent", async () => {
+    const session = observerSession();
+    const local = recordingClient(session);
+    // The backend rejects this exact handle; the error must name it.
+    const invalidHandle = "openai/gpt-9";
+    local.client.conversations.update.mockRejectedValue(
+      new Error(`unknown model handle ${invalidHandle}`),
+    );
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+    const input = observation({
+      ...projectConfig(false),
+      modelOverrides: { claude_code: { model: invalidHandle } },
+    });
+    input.route = {
+      ...route("conv-observer"),
+      appliedModelState: {
+        model: null,
+        modelSettings: null,
+        contextWindowLimit: null,
+      },
+    };
+
+    const result = await runtime.run(input);
+
+    expect(result).toMatchObject({
+      status: "failed",
+      error: `unknown model handle ${invalidHandle}`,
+    });
+    // The failing handle is what was actually sent, so the error is
+    // attributable to the configuration rather than to transport noise.
+    expect(local.client.conversations.update).toHaveBeenCalledWith(
+      "conv-observer",
+      expect.objectContaining({ model: invalidHandle }),
+    );
+    expect(session.send).not.toHaveBeenCalled();
+  });
+
+  it("primes only a newly created Subconscious conversation", async () => {
+    const session = observerSession();
+    const local = recordingClient(session);
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: local.client as unknown as LettaAgentClient,
+    });
+
+    await runtime.run(observation(projectConfig(false)));
+    const resumed = observation(projectConfig(false));
+    resumed.route = route("conv-observer");
+    await runtime.run(resumed);
+
+    const first = String(session.send.mock.calls[0]?.[0]);
+    const second = String(session.send.mock.calls[1]?.[0]);
+    expect(first).toContain("This agent session is using Subconscious");
+    expect(first).toContain('<observation type="turn_stop">');
+    expect(second).toBe(
+      '<observation type="turn_stop">\nObserved turn.\n</observation>',
+    );
   });
 
   it("moves a sandboxed project onto the Cloud client without the project root", async () => {
@@ -377,8 +922,8 @@ describe("Agent SDK runtime", () => {
     const result = await runtime.run(observation(projectConfig(true)));
 
     expect(result.status).toBe("success");
-    expect(local.client.createSession).not.toHaveBeenCalled();
-    expect(sandbox.client.createSession).toHaveBeenCalledOnce();
+    expect(local.client.conversations.create).not.toHaveBeenCalled();
+    expect(sandbox.client.conversations.create).toHaveBeenCalledOnce();
     // The sandbox has no project checkout and cloud transports ignore session
     // env, so neither belongs on the session.
     expect(sandbox.captured.options?.cwd).toBeUndefined();
@@ -432,6 +977,17 @@ describe("direct queued-message delivery", () => {
       send: vi.fn(async () => {}),
       close: vi.fn(),
       conversationId: "conv-harness",
+      stream: vi.fn(() =>
+        (async function* () {
+          yield {
+            type: "result" as const,
+            success: true,
+            durationMs: 1,
+            conversationId: "conv-harness",
+            runIds: ["run-delivery"],
+          };
+        })(),
+      ),
     },
   ) {
     const captured: { options?: LettaCodeClientSessionOptions } = {};
@@ -486,10 +1042,15 @@ describe("direct queued-message delivery", () => {
       "The migration has to run before the deploy.",
       { otid: "delivery-one" },
     );
+    expect(session.stream).toHaveBeenCalledOnce();
     expect(session.close).toHaveBeenCalledOnce();
     // A model would rewrite the coding agent's own configuration, and a client
-    // tool would make the broker execute the coding agent's tool calls.
+    // tool would make the broker execute the coding agent's tool calls. The
+    // SDK applies dreaming persistently with scope both, so it must stay off
+    // the delivery options entirely rather than being explicitly disabled.
     expect(captured.options?.model).toBeUndefined();
+    expect(captured.options?.reasoningEffort).toBeUndefined();
+    expect(captured.options?.dreaming).toBeUndefined();
     expect(captured.options?.allowedTools).toEqual([]);
     expect(captured.options?.toolset).toEqual({ base: "none", include: [] });
     expect(
@@ -544,6 +1105,17 @@ describe("direct queued-message delivery", () => {
       }),
       close: vi.fn(),
       conversationId: "conv-harness",
+      stream: vi.fn(() =>
+        (async function* () {
+          yield {
+            type: "result" as const,
+            success: true,
+            durationMs: 1,
+            conversationId: "conv-harness",
+            runIds: ["run-delivery"],
+          };
+        })(),
+      ),
     };
     const { client } = harnessClient(
       { id: "conv-harness", agent_id: "agent-harness" },
@@ -561,6 +1133,161 @@ describe("direct queued-message delivery", () => {
     });
 
     expect(result).toEqual({ status: "retry", error: "socket closed" });
+    expect(session.stream).not.toHaveBeenCalled();
     expect(session.close).toHaveBeenCalledOnce();
+  });
+
+  it("does not acknowledge a queued message before its turn completes", async () => {
+    const session = {
+      send: vi.fn(async () => {}),
+      close: vi.fn(),
+      conversationId: "conv-harness",
+      stream: vi.fn(() =>
+        (async function* () {
+          yield {
+            type: "result" as const,
+            success: false,
+            durationMs: 1,
+            conversationId: "conv-harness",
+            runIds: ["run-delivery"],
+            errorDetail: "turn failed before persistence",
+          };
+        })(),
+      ),
+    };
+    const { client } = harnessClient(
+      { id: "conv-harness", agent_id: "agent-harness" },
+      session,
+    );
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: client as unknown as LettaAgentClient,
+    });
+
+    const result = await runtime.deliverQueuedMessage({
+      identity,
+      deliveryId: "delivery-one",
+      text: "Retry the complete turn.",
+    });
+
+    expect(result).toEqual({
+      status: "retry",
+      error: "turn failed before persistence",
+    });
+    expect(session.stream).toHaveBeenCalledOnce();
+    expect(session.close).toHaveBeenCalledOnce();
+  });
+
+  it("sends once when startup recovery and the drain race on one record", async () => {
+    let release: (() => void) | undefined;
+    const inFlight = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const session = {
+      send: vi.fn(async () => {
+        await inFlight;
+      }),
+      close: vi.fn(),
+      conversationId: "conv-harness",
+      stream: vi.fn(() =>
+        (async function* () {
+          yield {
+            type: "result" as const,
+            success: true,
+            durationMs: 1,
+            conversationId: "conv-harness",
+            runIds: ["run-delivery"],
+          };
+        })(),
+      ),
+    };
+    const { client } = harnessClient(
+      { id: "conv-harness", agent_id: "agent-harness" },
+      session,
+    );
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: client as unknown as LettaAgentClient,
+    });
+    const input = {
+      identity,
+      deliveryId: "delivery-race",
+      text: "Ship the lock fix.",
+    };
+
+    // Both loops grab the same pending record in the same instant.
+    const first = runtime.deliverQueuedMessage(input);
+    const second = runtime.deliverQueuedMessage(input);
+    while (session.send.mock.calls.length === 0) {
+      await Promise.resolve();
+    }
+    release?.();
+
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(firstResult.status).toBe("delivered");
+    expect(secondResult.status).toBe("delivered");
+    // The second caller joined the first's in-flight send instead of opening
+    // its own session for the same record.
+    expect(session.send).toHaveBeenCalledOnce();
+    expect(session.stream).toHaveBeenCalledOnce();
+    expect(session.close).toHaveBeenCalledOnce();
+  });
+
+  it("serializes distinct deliveries so their turns never interleave", async () => {
+    const events: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const session = {
+      send: vi.fn(async (message: string) => {
+        events.push(`send:${message}`);
+        if (message === "first") await firstGate;
+      }),
+      close: vi.fn(),
+      conversationId: "conv-harness",
+      stream: vi.fn(() =>
+        (async function* () {
+          yield {
+            type: "result" as const,
+            success: true,
+            durationMs: 1,
+            conversationId: "conv-harness",
+            runIds: ["run-delivery"],
+          };
+        })(),
+      ),
+    };
+    const { client } = harnessClient(
+      { id: "conv-harness", agent_id: "agent-harness" },
+      session,
+    );
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: client as unknown as LettaAgentClient,
+    });
+
+    const first = runtime.deliverQueuedMessage({
+      identity,
+      deliveryId: "delivery-a",
+      text: "first",
+    });
+    const second = runtime.deliverQueuedMessage({
+      identity,
+      deliveryId: "delivery-b",
+      text: "second",
+    });
+    // Give the second call a chance to run ahead; serialization must hold it
+    // until the first turn has fully settled.
+    await Promise.resolve();
+    await Promise.resolve();
+    releaseFirst?.();
+    await Promise.all([first, second]);
+
+    expect(events.indexOf("send:first")).toBeLessThan(
+      events.indexOf("send:second"),
+    );
+    expect(session.send).toHaveBeenCalledTimes(2);
   });
 });

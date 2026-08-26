@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,7 +9,9 @@ import {
 } from "../packages/cli/broker.js";
 import {
   deliveryId,
+  routeKey,
   sendBrokerRequest,
+  validateProjectConfig,
   writeProjectConfig,
   type BrokerDescriptor,
   type DeliveryRecord,
@@ -102,6 +104,7 @@ describe("broker lifecycle", () => {
         });
         return {
           status: "success",
+          effectiveModel: null,
           conversationId: "conv-observer",
           result: {
             type: "result",
@@ -291,6 +294,7 @@ describe("broker lifecycle", () => {
         if (input.event.id === "ambiguous") throw new Error("runtime crashed");
         return {
           status: "success",
+          effectiveModel: null,
           conversationId: "conv-recovered",
           result: {
             type: "result",
@@ -410,6 +414,7 @@ describe("broker lifecycle", () => {
         const conversationId = `conv-${input.event.sessionId}`;
         return {
           status: "success",
+          effectiveModel: null,
           conversationId,
           result: {
             type: "result",
@@ -508,6 +513,7 @@ describe("broker lifecycle", () => {
         });
         return {
           status: "success",
+          effectiveModel: null,
           conversationId: "conv-observer",
           result: {
             type: "result",
@@ -602,6 +608,7 @@ describe("broker lifecycle", () => {
         seenPayload = input.event.payload;
         return {
           status: "success",
+          effectiveModel: null,
           conversationId: "conv-observer",
           result: {
             type: "result",
@@ -715,6 +722,7 @@ describe("mid-turn observation", () => {
   function successfulRun(): RunObservationResult {
     return {
       status: "success",
+      effectiveModel: null,
       conversationId: "conv-observer",
       result: {
         type: "result",
@@ -1000,6 +1008,7 @@ describe("broker shutdown", () => {
           await inFlight;
           return {
             status: "success",
+            effectiveModel: null,
             conversationId: "conv-observer",
             result: {
               type: "result",
@@ -1074,6 +1083,7 @@ describe("session status claim", () => {
     const runtime = {
       run: async (): Promise<RunObservationResult> => ({
         status: "success",
+        effectiveModel: null,
         conversationId: "conv-observer",
         result: {
           type: "result",
@@ -1154,6 +1164,340 @@ describe("session status claim", () => {
   });
 });
 
+describe("model overrides", () => {
+  it("records requested, source, effort, and effective model on the route", async () => {
+    const directory = await root();
+    await writeProjectConfig(
+      directory,
+      validateProjectConfig({
+        version: 1,
+        agent_id: "agent-test",
+        model_overrides: {
+          claude_code: {
+            model: "anthropic/claude-sonnet-5",
+            reasoning_effort: "high",
+          },
+          codex: { model: "openai/gpt-5.2" },
+        },
+        delivery: { whispers: true, queue_messages: false },
+        observer: {},
+      }),
+    );
+    const descriptor: BrokerDescriptor = {
+      version: 1,
+      endpoint:
+        process.platform === "win32"
+          ? `\\\\.\\pipe\\subconscious-test-${randomUUID()}`
+          : join(directory, "broker.sock"),
+      token: "test-token",
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    };
+    const runtime = {
+      run: async (
+        input: RunObservationInput,
+      ): Promise<RunObservationResult> => ({
+        status: "success",
+        conversationId: "conv-observer",
+        result: {
+          type: "result",
+          success: true,
+          durationMs: 1,
+          conversationId: "conv-observer",
+          runIds: ["run-observer"],
+        },
+        effectiveModel: "anthropic/claude-sonnet-5",
+        appliedModelState: {
+          model: "anthropic/claude-sonnet-5",
+          modelSettings: null,
+          contextWindowLimit: null,
+        },
+      }),
+    };
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime,
+    });
+    await broker.start();
+    try {
+      const event = {
+        id: "event-override",
+        harness: "claude-code" as const,
+        type: "session_start" as const,
+        sessionId: "session-override",
+        workingDirectory: directory,
+        occurredAt: new Date().toISOString(),
+        payload: {},
+      };
+      await sendBrokerRequest(descriptor, { type: "observe", event });
+      await waitFor(async () => {
+        const response = await sendBrokerRequest(descriptor, {
+          type: "status",
+        });
+        return (
+          response.ok &&
+          response.type === "status" &&
+          response.state.observations[event.id]?.status === "processed"
+        );
+      });
+
+      const state = await sendBrokerRequest(descriptor, { type: "status" });
+      if (!state.ok || state.type !== "status") throw new Error("no state");
+      const routeKey = Object.keys(state.state.routes)[0];
+      expect(state.state.routes[routeKey]).toMatchObject({
+        requestedModel: "anthropic/claude-sonnet-5",
+        modelOverrideSource: "harness",
+        reasoningEffort: "high",
+        effectiveModel: "anthropic/claude-sonnet-5",
+        appliedModelState: {
+          model: "anthropic/claude-sonnet-5",
+          modelSettings: null,
+          contextWindowLimit: null,
+        },
+      });
+
+      // The same session under a different harness resolves a different
+      // override without disturbing the first route.
+      await sendBrokerRequest(descriptor, {
+        type: "observe",
+        event: {
+          ...event,
+          id: "event-override-codex",
+          harness: "codex" as const,
+          sessionId: "session-override-codex",
+        },
+      });
+      await waitFor(async () => {
+        const response = await sendBrokerRequest(descriptor, {
+          type: "status",
+        });
+        return (
+          response.ok &&
+          response.type === "status" &&
+          response.state.observations["event-override-codex"]?.status ===
+            "processed"
+        );
+      });
+      const after = await sendBrokerRequest(descriptor, { type: "status" });
+      if (!after.ok || after.type !== "status") throw new Error("no state");
+      const codexRoute = Object.values(after.state.routes).find(
+        (route) => route.harness === "codex",
+      );
+      expect(codexRoute).toMatchObject({
+        requestedModel: "openai/gpt-5.2",
+        modelOverrideSource: "harness",
+      });
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("drops a stale effective model when a later turn reports none", async () => {
+    const directory = await root();
+    await writeProjectConfig(directory, {
+      version: 1,
+      agentId: "agent-test",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages: false },
+      observer: {},
+    });
+    const descriptor: BrokerDescriptor = {
+      version: 1,
+      endpoint:
+        process.platform === "win32"
+          ? `\\\\.\\pipe\\subconscious-test-${randomUUID()}`
+          : join(directory, "broker.sock"),
+      token: "test-token",
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    };
+    let turns = 0;
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime: {
+        run: async (
+          input: RunObservationInput,
+        ): Promise<RunObservationResult> => {
+          turns += 1;
+          return {
+            status: "success",
+            conversationId: "conv-observer",
+            result: {
+              type: "result",
+              success: true,
+              durationMs: 1,
+              conversationId: "conv-observer",
+              runIds: [`run-${turns}`],
+            },
+            // The backend reported a model on turn one and nothing on turn
+            // two; the route must follow rather than keep the old value.
+            effectiveModel: turns === 1 ? "letta/auto" : null,
+          };
+        },
+      },
+    });
+    await broker.start();
+    try {
+      for (const [index, eventId] of ["event-one", "event-two"].entries()) {
+        await sendBrokerRequest(descriptor, {
+          type: "observe",
+          event: {
+            id: eventId,
+            harness: "claude-code" as const,
+            type: "turn_stop" as const,
+            sessionId: "session-effective",
+            workingDirectory: directory,
+            occurredAt: new Date().toISOString(),
+            payload: {},
+          },
+        });
+        await waitFor(async () => {
+          const response = await sendBrokerRequest(descriptor, {
+            type: "status",
+          });
+          return (
+            response.ok &&
+            response.type === "status" &&
+            response.state.observations[eventId]?.status === "processed"
+          );
+        });
+        void index;
+      }
+
+      const after = await sendBrokerRequest(descriptor, { type: "status" });
+      if (!after.ok || after.type !== "status") throw new Error("no state");
+      const route = Object.values(after.state.routes)[0];
+      expect(turns).toBe(2);
+      expect(route.effectiveModel).toBeUndefined();
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("keeps legacy routes that only carry the old model field loadable", async () => {
+    const directory = await root();
+    await writeProjectConfig(directory, {
+      version: 1,
+      agentId: "agent-test",
+      model: "letta/auto",
+      delivery: { whispers: true, queueMessages: false },
+      observer: {},
+    });
+    // A route written before overrides existed: a bare model string, no
+    // requestedModel, no source, no applied state. The key is the real hash of
+    // the route identity, because the identity never included the model.
+    const identity = {
+      configPath: join(directory, "subconscious.toml"),
+      projectRoot: directory,
+      agentId: "agent-test",
+      harness: "claude-code" as const,
+      sessionId: "session-legacy",
+    };
+    const legacyRoute = {
+      key: routeKey(identity),
+      ...identity,
+      model: "letta/auto",
+      conversationId: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const seeded = {
+      version: 1,
+      routes: { [legacyRoute.key]: legacyRoute },
+      observations: {},
+      observationOrder: [],
+      deliveries: {},
+    };
+    await writeFile(join(directory, "state.json"), JSON.stringify(seeded));
+
+    const descriptor: BrokerDescriptor = {
+      version: 1,
+      endpoint:
+        process.platform === "win32"
+          ? `\\\\.\\pipe\\subconscious-test-${randomUUID()}`
+          : join(directory, "broker.sock"),
+      token: "test-token",
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    };
+    const captured: { input: RunObservationInput | null } = { input: null };
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime: {
+        run: async (
+          input: RunObservationInput,
+        ): Promise<RunObservationResult> => {
+          captured.input = input;
+          return {
+            status: "success",
+            effectiveModel: null,
+            conversationId: "conv-observer",
+            result: {
+              type: "result",
+              success: true,
+              durationMs: 1,
+              conversationId: "conv-observer",
+              runIds: ["run-legacy"],
+            },
+          };
+        },
+      },
+    });
+    await broker.start();
+    try {
+      // The legacy route is found by the same identity a new event computes,
+      // because the route key never included the model.
+      await sendBrokerRequest(descriptor, {
+        type: "observe",
+        event: {
+          id: "event-legacy",
+          harness: "claude-code" as const,
+          type: "turn_stop" as const,
+          sessionId: "session-legacy",
+          workingDirectory: directory,
+          occurredAt: new Date().toISOString(),
+          payload: {},
+        },
+      });
+      await waitFor(async () => {
+        const response = await sendBrokerRequest(descriptor, {
+          type: "status",
+        });
+        return (
+          response.ok &&
+          response.type === "status" &&
+          response.state.observations["event-legacy"]?.status === "processed"
+        );
+      });
+
+      if (!captured.input) throw new Error("The runtime was not called.");
+      // The broker's migration claim ends here: the pre-override route is
+      // found by the same identity and handed to the runtime with its legacy
+      // state intact. Whether that triggers a management update is the
+      // runtime's own test.
+      expect(captured.input.route.key).toBe(legacyRoute.key);
+      expect(captured.input.route.appliedModelState).toBeUndefined();
+
+      const after = await sendBrokerRequest(descriptor, { type: "status" });
+      if (!after.ok || after.type !== "status") throw new Error("no state");
+      const route = after.state.routes[legacyRoute.key];
+      expect(route).toMatchObject({
+        modelOverrideSource: "project",
+        requestedModel: "letta/auto",
+      });
+      // The obsolete field is retired on the first processed observation
+      // rather than lingering beside its replacements.
+      expect(route.model).toBeUndefined();
+      expect(route.effectiveModel).toBeUndefined();
+    } finally {
+      await broker.close();
+    }
+  });
+});
+
 describe("direct queued messages", () => {
   async function project(queueMessages = true): Promise<string> {
     const directory = await root();
@@ -1218,6 +1562,7 @@ describe("direct queued messages", () => {
         });
         return {
           status: "success",
+          effectiveModel: null,
           conversationId: "conv-observer",
           result: {
             type: "result",

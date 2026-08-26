@@ -6,6 +6,7 @@ import {
   createRouteRecord,
   findProjectConfig,
   identityRedactor,
+  resolveModelSelection,
   routeKey,
   StateStore,
   type BrokerDescriptor,
@@ -264,10 +265,13 @@ export class SubconsciousBroker {
       configPath: project.path,
       projectRoot: project.projectRoot,
       agentId,
-      model: project.config.model,
       harness: event.harness,
       sessionId: event.sessionId,
     };
+    // The model decision is read per event, not baked into the route key, so
+    // editing an override in the file moves the existing conversation instead
+    // of forking a new one.
+    const selection = resolveModelSelection(project.config, event.harness);
     const key = routeKey(identity);
     const adapter = getAdapter(event.harness);
     const capabilities = adapter.capabilities;
@@ -284,7 +288,14 @@ export class SubconsciousBroker {
     await this.store.update((state) => {
       if (state.observations[event.id]) return;
       const timestamp = now();
-      state.routes[key] ??= createRouteRecord(identity, timestamp);
+      state.routes[key] ??= {
+        ...createRouteRecord(identity, timestamp),
+        ...(selection.model ? { requestedModel: selection.model } : {}),
+        modelOverrideSource: selection.source,
+        ...(selection.reasoningEffort
+          ? { reasoningEffort: selection.reasoningEffort }
+          : {}),
+      };
       state.routes[key]!.clientDeliveryTools = clientDeliveryTools;
       // Only overwrite when this event carried an identity. Letta Code Stop
       // input has no conversation fields, and clearing the route on one of
@@ -490,7 +501,34 @@ export class SubconsciousBroker {
         record.runIds = result.result.runIds;
         delete record.error;
         currentRoute.conversationId = result.conversationId;
-        currentRoute.model = observation.config.model;
+        {
+          const selection = resolveModelSelection(
+            observation.config,
+            observation.event.harness,
+          );
+          delete currentRoute.model;
+          if (selection.model) {
+            currentRoute.requestedModel = selection.model;
+          } else {
+            delete currentRoute.requestedModel;
+          }
+          currentRoute.modelOverrideSource = selection.source;
+          if (selection.reasoningEffort) {
+            currentRoute.reasoningEffort = selection.reasoningEffort;
+          } else {
+            delete currentRoute.reasoningEffort;
+          }
+        }
+        // A null effective model means the backend reported none this turn;
+        // the previous value must go rather than posing as current.
+        if (result.effectiveModel) {
+          currentRoute.effectiveModel = result.effectiveModel;
+        } else {
+          delete currentRoute.effectiveModel;
+        }
+        if (result.appliedModelState) {
+          currentRoute.appliedModelState = result.appliedModelState;
+        }
         if (result.runtimeReportedTools) {
           currentRoute.runtimeReportedTools = result.runtimeReportedTools;
         }
@@ -749,7 +787,6 @@ export class SubconsciousBroker {
       configPath: project.path,
       projectRoot: project.projectRoot,
       agentId: project.config.agentId,
-      model: project.config.model,
       harness: target.harness,
       sessionId: target.sessionId,
     });
@@ -782,12 +819,29 @@ export class SubconsciousBroker {
     });
     if (!claimed) return { ok: true, type: "session_status", status: null };
     const { route, config } = resolved;
+    // The route carries the model decision from its last observation; a brand
+    // new route falls back to reading the file so the very first banner is
+    // still honest about what the configuration asks for.
+    const selection = resolveModelSelection(config, route.harness);
     return {
       ok: true,
       type: "session_status",
       status: {
         agentId: route.agentId,
-        model: route.model,
+        ...((route.requestedModel ?? selection.model)
+          ? { model: route.requestedModel ?? selection.model }
+          : {}),
+        ...((route.requestedModel ?? selection.model)
+          ? { requestedModel: route.requestedModel ?? selection.model }
+          : {}),
+        modelOverrideSource: route.modelOverrideSource ?? selection.source,
+        ...((route.reasoningEffort ?? selection.reasoningEffort)
+          ? {
+              reasoningEffort:
+                route.reasoningEffort ?? selection.reasoningEffort,
+            }
+          : {}),
+        effectiveModel: route.effectiveModel,
         harness: route.harness,
         sessionId: route.sessionId,
         conversationId: route.conversationId,

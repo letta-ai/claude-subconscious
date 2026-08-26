@@ -15,6 +15,7 @@ import {
   type HarnessId,
 } from "../core/index.js";
 import { getAdapter } from "./adapters.js";
+import { withHermesHome } from "../adapter-hermes/index.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -37,6 +38,12 @@ export function enrichHookInput(
       stringValue(env.LETTA_WORKING_DIR) ??
       stringValue(env.USER_CWD),
   };
+  if (harness === "hermes") {
+    // The hook subprocess is the only witness of which Hermes profile spawned
+    // it; stamp its resolved HERMES_HOME so a broker started by any other
+    // harness still reads this session's transcript.
+    return withHermesHome(contextual, env);
+  }
   if (harness !== "letta-code") return contextual;
   return {
     ...contextual,
@@ -199,6 +206,11 @@ export function formatHookOutput(
 ): string | null {
   if (!text) return null;
   if (channel === "stdout") return text;
+  // Hermes' shell-hook contract for pre_llm_call is a bare {"context": ...}
+  // object; its parser accepts no other shape there (shell_hooks.py
+  // _parse_response). Emitting the Claude envelope would be silently dropped
+  // and the whisper spent unacknowledged-never-seen.
+  if (channel === "context") return JSON.stringify({ context: text });
   return JSON.stringify({
     hookSpecificOutput: { hookEventName: event, additionalContext: text },
   });

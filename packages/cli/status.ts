@@ -69,7 +69,8 @@ export function createStatusReport(context: StatusContext) {
         config: {
           version: context.project.config.version,
           agentId: context.project.config.agentId,
-          model: context.project.config.model,
+          model: context.project.config.model ?? null,
+          modelOverrides: context.project.config.modelOverrides ?? null,
           delivery: context.project.config.delivery,
           observerInstructionsConfigured: Boolean(
             context.project.config.observer.instructions?.trim(),
@@ -95,6 +96,10 @@ export function createStatusReport(context: StatusContext) {
         agentId: route.agentId,
         sessionId: route.sessionId,
         conversationId: route.conversationId,
+        requestedModel: route.requestedModel ?? route.model ?? null,
+        modelOverrideSource: route.modelOverrideSource ?? null,
+        reasoningEffort: route.reasoningEffort ?? null,
+        effectiveModel: route.effectiveModel ?? null,
         clientToolAllowlist: [
           "Read",
           "LS",
@@ -264,8 +269,22 @@ function formatDetail(
     const conversation = route.conversationId
       ? `conversation ${shortId(route.conversationId)}`
       : "conversation pending";
+    // The whole model decision in one short segment: what the file asks for,
+    // what the backend actually used last turn, and where each came from.
+    const requested = route.requestedModel ?? route.model;
+    const modelDetail = [
+      `model ${requested ?? "inherit"}`,
+      ...(route.effectiveModel ? [`-> ${route.effectiveModel}`] : []),
+      ...(route.modelOverrideSource ? [`[${route.modelOverrideSource}]`] : []),
+      ...(route.reasoningEffort ? [`(${route.reasoningEffort})`] : []),
+    ].join(" ");
+    const segments = [
+      `session ${shortId(route.sessionId)}`,
+      conversation,
+      modelDetail,
+    ];
     lines.push(
-      `  ${route.harness.padEnd(12)} ${routeStatus(route, observations).padEnd(10)} session ${shortId(route.sessionId)}  ${conversation}`,
+      `  ${route.harness.padEnd(12)} ${routeStatus(route, observations).padEnd(10)} ${segments.join("  ")}`,
     );
   }
   if (routes.length > recent.length) {
@@ -323,7 +342,7 @@ export function formatStatus(
     line(
       "Observer",
       context.project?.config.agentId
-        ? `${options.detail ? context.project.config.agentId : shortId(context.project.config.agentId, 18)} (${context.project.config.model})`
+        ? `${options.detail ? context.project.config.agentId : shortId(context.project.config.agentId, 18)} (${context.project.config.model ?? "agent default"})`
         : "none",
     ),
     line(

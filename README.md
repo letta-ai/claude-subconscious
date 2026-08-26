@@ -1,19 +1,21 @@
 # Subconscious
 
-Subconscious is a persistent context manager for coding-agent sessions. It supports Claude Code, Codex, and Letta Code through small harness adapters.
+Subconscious lets any Letta agent observe another agent's session through small harness adapters. The bundled adapters support Claude Code, Codex, and Letta Code, but the protocol is not limited to coding agents.
 
-A Letta agent routes durable project information into MemFS. It retrieves relevant context and prepares it for the next coding-agent turn.
+A one-time session message tells the Letta agent that it is monitoring another agent through Subconscious, names its delivery tools, requires verified guidance or explicit uncertainty, and supplies project instructions. Later observations contain only the new transcript event. Subconscious does not replace or rewrite the Letta agent's system prompt.
 
 ## Delivery contract
 
 Subconscious exposes two Agent SDK tools:
 
-- `send_whisper` stores passive context for the next harness turn.
+- `send_whisper` stores passive context for the next supported harness boundary.
 - `queue_message` sends an actionable message that starts a new harness turn.
 
 Subconscious discards ordinary assistant text. No delivery tool call means no harness output.
 
 Every adapter supports passive whispers. Only Letta Code supports `queue_message`, because a Letta Code session is a Letta agent in a Letta conversation that the broker can write to directly. Claude Code and Codex are foreign harnesses whose hooks cannot start a turn, so they keep `queue_message` disabled. A project also has to set `queue_messages = true`, which is off by default.
+
+For a queued Letta message, the broker keeps the Agent SDK session open and drains the turn stream. It acknowledges delivery only after a successful terminal result; a failed or incomplete turn stays pending for retry under the same delivery OTID.
 
 ## Architecture
 
@@ -23,7 +25,7 @@ One local broker owns Agent SDK sessions, routes, event cursors, and pending del
 Claude Code ─┐
 Codex ───────┼─ adapter ─ local broker ─ Letta Agent SDK ─ observer agent
 Letta Code ──┘                  │
-                               └─ durable state and delivery acknowledgements
+                               └─ persistent state and delivery acknowledgements
 ```
 
 The broker uses a Unix domain socket on macOS and Linux. It uses a named pipe on Windows. It does not open a TCP port.
@@ -36,13 +38,13 @@ Each native harness session maps to one Letta conversation. The broker serialize
 2. **The adapter finds the project configuration.** It searches parent directories for the nearest `subconscious.toml`. It exits when no configuration applies.
 3. **The hook delivers pending whispers.** On `SessionStart` and `UserPromptSubmit`, the hook leases pending whispers before it records the current event. It formats each whisper for the harness and acknowledges delivery.
 4. **The broker records the observation.** It rejects duplicate event IDs and maps the native session to one Letta conversation. It serializes observations that share an observer agent.
-5. **The observer manages context.** It retrieves related MemFS files, reads project files when necessary, and routes new durable information into MemFS.
-6. **The observer prepares the next turn.** It calls `send_whisper` with relevant decisions, constraints, paths, previous attempts, risks, or pending work. Ordinary assistant text is discarded.
-7. **The next safe hook boundary delivers the whisper.** If the observer does not call a delivery tool, the harness receives no output.
+5. **The Subconscious agent uses its own judgment.** The session primer explains that it is monitoring the transcript and can guide the observed agent when important. Its existing identity, memory, shared repositories, and system prompt remain intact.
+6. **Later observations stay small.** Each subsequent message contains only the new transcript event. When useful, the Subconscious agent calls `send_whisper`; ordinary assistant text is discarded.
+7. **The next safe hook boundary delivers the whisper.** If no delivery tool is called, the harness receives no output.
 
 For example, a coding agent can propose a change to an obsolete Python route. Subconscious can remember that TypeScript owns the route and call `send_whisper`. The coding agent receives that correction when the next user turn starts.
 
-The observer does not block the active coding-agent turn. Context from the current observation becomes available at the next safe prompt boundary.
+Subconscious does not block the active agent turn. Context from the current observation becomes available at the next safe prompt boundary.
 
 The broker saves routes, observations, cursors, and pending deliveries under `~/.letta/subconscious/`. An ambiguous Agent SDK send blocks its route until reconciliation confirms whether the original event reached Letta.
 
@@ -52,7 +54,7 @@ The broker saves routes, observations, cursors, and pending deliveries under `~/
 - A Letta Cloud API key in `LETTA_API_KEY`
 - One supported coding harness
 
-Subconscious uses `@letta-ai/letta-agent-sdk` 0.7.1. It does not use the deprecated Letta Code SDK or direct Letta REST requests.
+Subconscious uses `@letta-ai/letta-agent-sdk` 0.7.6. Project model settings are applied to the observer conversation rather than changing the supplied agent's default. It does not use the deprecated Letta Code SDK or direct Letta REST requests.
 
 ## Build from source
 
@@ -75,12 +77,11 @@ export LETTA_API_KEY="your-api-key"
 subconscious init
 ```
 
-`subconscious init` creates an observer agent with `letta/auto` and MemFS. It does not create or attach legacy memory blocks. It then writes `subconscious.toml`:
+`subconscious init` creates a minimal observer agent with `letta/auto` and MemFS. It does not replace the standard Letta system prompt or create legacy memory blocks. You can instead attach any existing Letta agent with `subconscious init --agent agent-...`. Without an explicit `--model`, the written file names no model, so a new observer inherits its own `letta/auto` default and a supplied agent keeps whatever it already uses. `subconscious init --model <handle>` writes that model and applies it as a conversation override. The command then writes `subconscious.toml`, which for a plain init has no `model` line at all:
 
 ```toml
 version = 1
 agent_id = "agent-..."
-model = "letta/auto"
 
 [delivery]
 whispers = true
@@ -91,6 +92,39 @@ instructions = "Focus on regressions and forgotten project decisions."
 ```
 
 Subconscious walks from the harness working directory toward the filesystem root. The nearest `subconscious.toml` file wins. A directory without this file stays unobserved.
+
+### Choose a model
+
+The `model` key is optional. When it is absent, the observer inherits whatever model the attached agent defaults to. An explicit `model` applies to every observer conversation for the project as a conversation-scoped override, so the supplied agent's own default stays untouched:
+
+```toml
+version = 1
+agent_id = "agent-..."
+model = "letta/auto"
+```
+
+One project can observe several harnesses, and each harness may want a different observer model. `[model_overrides.<harness>]` tables take precedence over the top-level `model` for that harness alone. Keys are `claude_code`, `codex`, `letta_code`, and `hermes`:
+
+```toml
+[model_overrides.claude_code]
+model = "anthropic/claude-sonnet-5"
+reasoning_effort = "high"
+context_window_limit = 200000
+
+[model_overrides.claude_code.settings]
+temperature = 0.2
+```
+
+Each override table accepts:
+
+- `model`: a non-empty model handle.
+- `reasoning_effort`: one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. The runtime re-applies it on every observer turn.
+- `context_window_limit`: a positive whole number, persisted on the conversation.
+- `settings`: a table of provider-specific model settings, persisted on the conversation. Values must be JSON-compatible and cannot be null.
+
+`reasoning_effort` and `settings` are mutually exclusive in one table: the first asks the normalized runtime for a reasoning tier, while the second replaces provider settings directly, and combining them would make their precedence ambiguous. Fields a harness table omits fall back to the lower levels: an effort-only override keeps the project-wide model.
+
+Precedence is therefore: harness override, then the project-wide `model`, then the attached agent's default. Editing an override takes effect on that harness's next observation, which updates the existing Subconscious conversation in place; removing one clears the persisted overrides so the conversation inherits again. No route or conversation is ever forked by a model change.
 
 Add `sandbox = true` under `[observer]` to run the observer's tools in a Letta managed sandbox instead of on this machine. The sandbox does not mount the project, so the observer keeps its MemFS and can no longer read project files. Leave the key out for local tools and full project access.
 
@@ -106,6 +140,8 @@ mid_turn_min_seconds = 90
 `mid_turn_min_tool_calls` is how many tool calls one observation must cover before it runs. `mid_turn_min_seconds` is the quiet period after the observer's previous turn on that session. Both must pass. Raise either one to spend fewer observer turns on a busy session.
 
 `npm run check` runs the fast suite. `npm run test:e2e` is separate: it starts a real Claude Code process with the hook registered, and checks that a whisper waiting in the broker is read back by the model. It needs the `claude` binary and a logged-in session, and takes about ten seconds per case.
+
+`npm run test:model-e2e` is a second opt-in suite for the model-override pipeline: it creates one disposable hidden observer, drives two real turns with a full harness override and then with every override removed, and checks the server-persisted conversation state each time. It needs `LETTA_API_KEY` in the environment and no Claude authentication; without the key it fails loudly rather than skipping.
 
 Two configurations can use one observer agent. Those projects share the agent's memory. Use separate agent IDs for project memory isolation.
 
@@ -139,6 +175,16 @@ subconscious install letta-code
 ```
 
 This command adds hooks to `.letta/settings.local.json`. It preserves existing project settings.
+
+### Hermes
+
+```bash
+subconscious install hermes
+```
+
+This command adds four shell hooks to the active Hermes profile's `config.yaml` (`on_session_start`, `pre_llm_call`, `post_tool_call`, `on_session_end`) and seeds exactly those four entries in Hermes' hook-consent allowlist. It never flips `hooks_auto_accept`. User comments and unrelated hooks are preserved, and rerunning changes nothing.
+
+Hermes reads whisper context only at its turn prologue (`pre_llm_call`), so guidance waits for the coding agent's next prompt rather than arriving mid-turn — this is narrower than the Claude Code and Codex adapters, which can also deliver at tool boundaries. Observations read the active profile's `state.db` transcript directly; no per-session JSONL is involved.
 
 ## Operate the broker
 

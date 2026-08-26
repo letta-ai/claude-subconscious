@@ -35,6 +35,34 @@ function option(args: string[], name: string): string | undefined {
   return index >= 0 ? args[index + 1] : undefined;
 }
 
+/**
+ * Read a required-value flag for `init`.
+ *
+ * The generic `option` helper would happily consume a following flag or an
+ * empty string, turning `subconscious init --model --agent x` into a model
+ * named "--agent". Parsing both flags up front and validating their values
+ * means every rejection happens before any file or network side effect.
+ */
+function requiredOption(
+  args: string[],
+  name: string,
+  consumed: Set<number>,
+): string | undefined {
+  const index = args.indexOf(name);
+  if (index < 0) return undefined;
+  const value = args[index + 1];
+  if (
+    value === undefined ||
+    value.trim().length === 0 ||
+    value.startsWith("--")
+  ) {
+    throw new Error(`${name} requires a non-empty value.`);
+  }
+  consumed.add(index);
+  consumed.add(index + 1);
+  return value.trim();
+}
+
 function processExists(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -233,33 +261,38 @@ async function reconcile(args: string[]): Promise<void> {
   console.log(`Observation ${eventId} is ${response.status}.`);
 }
 
-async function init(args: string[]): Promise<void> {
+export async function init(args: string[]): Promise<void> {
   delete process.env.LETTA_BASE_URL;
   const consumed = new Set<number>();
-  for (const name of ["--agent", "--model"]) {
-    const index = args.indexOf(name);
-    if (index >= 0) {
-      consumed.add(index);
-      consumed.add(index + 1);
-    }
-  }
+  // Both flags are parsed and validated before anything else runs, so a bad
+  // value fails the command without touching files or the network.
+  const requestedAgentId = requiredOption(args, "--agent", consumed);
+  const requestedModel = requiredOption(args, "--model", consumed);
   const projectRoot =
     args.find((arg, index) => !consumed.has(index) && !arg.startsWith("--")) ??
     process.cwd();
   if (await findProjectConfig(projectRoot)) {
-    fail(`A ${"subconscious.toml"} file already applies to ${projectRoot}.`);
+    throw new Error(
+      `A ${"subconscious.toml"} file already applies to ${projectRoot}.`,
+    );
   }
   const apiKey = process.env.LETTA_API_KEY;
-  const model = option(args, "--model") ?? DEFAULT_MODEL;
-  let agentId = option(args, "--agent");
+  // An explicit --model is both the new agent's default and a conversation
+  // override. Without one, a fresh agent is still born on DEFAULT_MODEL, but
+  // the file names no model at all, so every conversation inherits that agent
+  // default and a supplied agent keeps its own.
+  const model = requestedModel ?? DEFAULT_MODEL;
+  let agentId = requestedAgentId;
   if (!agentId) {
-    if (!apiKey) fail("Set LETTA_API_KEY or pass --agent <agent-id>.");
+    if (!apiKey) {
+      throw new Error("Set LETTA_API_KEY or pass --agent <agent-id>.");
+    }
     agentId = await createObserverAgent({ apiKey, model });
   }
   const path = await writeProjectConfig(projectRoot, {
     version: 1,
     agentId,
-    model,
+    ...(requestedModel ? { model: requestedModel } : {}),
     delivery: { whispers: true, queueMessages: false },
     observer: {},
   });
@@ -304,6 +337,7 @@ function adapters(): void {
     "claude-code": version("claude"),
     codex: version("codex"),
     "letta-code": version("letta"),
+    hermes: version("hermes"),
   };
   console.log(
     JSON.stringify(
@@ -324,10 +358,13 @@ function usage(): void {
   subconscious start|stop|restart|adapters
   subconscious status [path] [--detail | --json]
   subconscious reconcile <event-id> (--retry | --discard)
-  subconscious install <claude-code|codex|letta-code> [path]
-  subconscious hook <claude-code|codex|letta-code>
+  subconscious install <claude-code|codex|hermes>
+  subconscious install letta-code [path]
+  subconscious hook <claude-code|codex|letta-code|hermes>
 `);
 }
+
+const HARNESS_ARGS = ["claude-code", "codex", "letta-code", "hermes"];
 
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
@@ -340,12 +377,8 @@ async function main(): Promise<void> {
   if (command === "adapters") return adapters();
   if (command === "init") return await init(args);
   if (command === "hook") {
-    if (
-      !(["claude-code", "codex", "letta-code"] as string[]).includes(
-        args[0] ?? "",
-      )
-    ) {
-      fail("hook requires claude-code, codex, or letta-code.");
+    if (!HARNESS_ARGS.includes(args[0] ?? "")) {
+      fail(`hook requires ${HARNESS_ARGS.join(", ")}.`);
     }
     try {
       await runHook(args[0] as KnownHarnessId);
@@ -357,12 +390,8 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "install") {
-    if (
-      !(["claude-code", "codex", "letta-code"] as string[]).includes(
-        args[0] ?? "",
-      )
-    ) {
-      fail("install requires claude-code, codex, or letta-code.");
+    if (!HARNESS_ARGS.includes(args[0] ?? "")) {
+      fail(`install requires ${HARNESS_ARGS.join(", ")}.`);
     }
     const harness = args[0] as KnownHarnessId;
     console.log(await installAdapter(harness, args[1]));

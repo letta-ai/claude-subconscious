@@ -23,6 +23,7 @@ describe("observer agent creation", () => {
       skillSources: [],
     });
     expect(request).not.toHaveProperty("memory");
+    expect(request).not.toHaveProperty("systemPrompt");
     expect(request).not.toHaveProperty("systemInfoReminder");
   });
 });

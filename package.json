@@ -20,7 +20,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts",
-    "format:check": "prettier --check \"packages/**/*.ts\" \"tests/**/*.ts\" \"scripts/check-specs.ts\" \"specs/SPEC-*.md\" README.md package.json tsconfig.json tsconfig.build.json vitest.config.ts vitest.e2e.config.ts hooks/hooks.json \".claude-plugin/plugin.json\" \".github/workflows/ci.yml\"",
+    "test:model-e2e": "npm run build && vitest run --config vitest.model-e2e.config.ts",
+    "format:check": "prettier --check \"packages/**/*.ts\" \"tests/**/*.ts\" \"scripts/check-specs.ts\" \"specs/SPEC-*.md\" README.md package.json tsconfig.json tsconfig.build.json vitest.config.ts vitest.e2e.config.ts vitest.model-e2e.config.ts hooks/hooks.json \".claude-plugin/plugin.json\" \".github/workflows/ci.yml\"",
     "package:check": "npm pack --dry-run",
     "spec:check": "tsx scripts/check-specs.ts",
     "check": "npm run spec:check && npm run format:check && npm run typecheck && npm run test && npm run build && npm run package:check",
@@ -30,7 +31,7 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@letta-ai/letta-agent-sdk": "0.7.1",
+    "@letta-ai/letta-agent-sdk": "0.7.6",
     "smol-toml": "1.8.0",
     "tsx": "^4.20.5"
   },
