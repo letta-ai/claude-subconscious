@@ -23,6 +23,7 @@ import { listAdapters } from "./adapters.js";
 import { SubconsciousBroker } from "./broker.js";
 import { runHook } from "./hook.js";
 import { installAdapter } from "./install.js";
+import { runOpencodeBridge } from "./opencode-bridge.js";
 import { createStatusReport, formatStatus, parseStatusArgs } from "./status.js";
 
 function fail(message: string): never {
@@ -338,6 +339,7 @@ function adapters(): void {
     codex: version("codex"),
     "letta-code": version("letta"),
     hermes: version("hermes"),
+    opencode: version("opencode"),
   };
   console.log(
     JSON.stringify(
@@ -360,11 +362,15 @@ function usage(): void {
   subconscious reconcile <event-id> (--retry | --discard)
   subconscious install <claude-code|codex|hermes>
   subconscious install letta-code [path]
+  subconscious install opencode [path]
   subconscious hook <claude-code|codex|letta-code|hermes>
 `);
 }
 
-const HARNESS_ARGS = ["claude-code", "codex", "letta-code", "hermes"];
+const HOOK_HARNESS_ARGS = ["claude-code", "codex", "letta-code", "hermes"];
+// OpenCode has no CLI hook: its generated plugin owns every native hook and
+// integrates through the hidden `opencode-bridge` command below.
+const INSTALL_HARNESS_ARGS = [...HOOK_HARNESS_ARGS, "opencode"];
 
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
@@ -377,8 +383,8 @@ async function main(): Promise<void> {
   if (command === "adapters") return adapters();
   if (command === "init") return await init(args);
   if (command === "hook") {
-    if (!HARNESS_ARGS.includes(args[0] ?? "")) {
-      fail(`hook requires ${HARNESS_ARGS.join(", ")}.`);
+    if (!HOOK_HARNESS_ARGS.includes(args[0] ?? "")) {
+      fail(`hook requires ${HOOK_HARNESS_ARGS.join(", ")}.`);
     }
     try {
       await runHook(args[0] as KnownHarnessId);
@@ -389,9 +395,15 @@ async function main(): Promise<void> {
     }
     return;
   }
+  // Hidden: the generated OpenCode plugin's transport to the broker. Not part
+  // of the public usage; the plugin is the only intended caller.
+  if (command === "opencode-bridge") {
+    await runOpencodeBridge();
+    return;
+  }
   if (command === "install") {
-    if (!HARNESS_ARGS.includes(args[0] ?? "")) {
-      fail(`install requires ${HARNESS_ARGS.join(", ")}.`);
+    if (!INSTALL_HARNESS_ARGS.includes(args[0] ?? "")) {
+      fail(`install requires ${INSTALL_HARNESS_ARGS.join(", ")}.`);
     }
     const harness = args[0] as KnownHarnessId;
     console.log(await installAdapter(harness, args[1]));

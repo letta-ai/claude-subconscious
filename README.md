@@ -1,6 +1,6 @@
 # Subconscious
 
-Subconscious lets any Letta agent observe another agent's session through small harness adapters. The bundled adapters support Claude Code, Codex, and Letta Code, but the protocol is not limited to coding agents.
+Subconscious lets any Letta agent observe another agent's session through small harness adapters. The bundled adapters support Claude Code, Codex, Letta Code, Hermes, and OpenCode, but the protocol is not limited to coding agents.
 
 A one-time session message tells the Letta agent that it is monitoring another agent through Subconscious, names its delivery tools, requires verified guidance or explicit uncertainty, and supplies project instructions. Later observations contain only the new transcript event. Subconscious does not replace or rewrite the Letta agent's system prompt.
 
@@ -13,7 +13,7 @@ Subconscious exposes two Agent SDK tools:
 
 Subconscious discards ordinary assistant text. No delivery tool call means no harness output.
 
-Every adapter supports passive whispers. Only Letta Code supports `queue_message`, because a Letta Code session is a Letta agent in a Letta conversation that the broker can write to directly. Claude Code and Codex are foreign harnesses whose hooks cannot start a turn, so they keep `queue_message` disabled. A project also has to set `queue_messages = true`, which is off by default.
+Every adapter supports passive whispers. Only Letta Code supports `queue_message`, because a Letta Code session is a Letta agent in a Letta conversation that the broker can write to directly. Claude Code, Codex, Hermes, and OpenCode are foreign harnesses whose hooks cannot start a turn, so they keep `queue_message` disabled. A project also has to set `queue_messages = true`, which is off by default.
 
 For a queued Letta message, the broker keeps the Agent SDK session open and drains the turn stream. It acknowledges delivery only after a successful terminal result; a failed or incomplete turn stays pending for retry under the same delivery OTID.
 
@@ -24,8 +24,9 @@ One local broker owns Agent SDK sessions, routes, event cursors, and pending del
 ```text
 Claude Code ─┐
 Codex ───────┼─ adapter ─ local broker ─ Letta Agent SDK ─ observer agent
-Letta Code ──┘                  │
-                               └─ persistent state and delivery acknowledgements
+Letta Code ──┼───────────────────────── │
+Hermes ──────┼───────────────────────── │
+OpenCode ────┘                         └─ persistent state and delivery acknowledgements
 ```
 
 The broker uses a Unix domain socket on macOS and Linux. It uses a named pipe on Windows. It does not open a TCP port.
@@ -103,7 +104,7 @@ agent_id = "agent-..."
 model = "letta/auto"
 ```
 
-One project can observe several harnesses, and each harness may want a different observer model. `[model_overrides.<harness>]` tables take precedence over the top-level `model` for that harness alone. Keys are `claude_code`, `codex`, `letta_code`, and `hermes`:
+One project can observe several harnesses, and each harness may want a different observer model. `[model_overrides.<harness>]` tables take precedence over the top-level `model` for that harness alone. Keys are `claude_code`, `codex`, `letta_code`, `hermes`, and `opencode`:
 
 ```toml
 [model_overrides.claude_code]
@@ -186,6 +187,24 @@ This command adds four shell hooks to the active Hermes profile's `config.yaml` 
 
 Hermes reads whisper context only at its turn prologue (`pre_llm_call`), so guidance waits for the coding agent's next prompt rather than arriving mid-turn — this is narrower than the Claude Code and Codex adapters, which can also deliver at tool boundaries. Observations read the active profile's `state.db` transcript directly; no per-session JSONL is involved.
 
+### OpenCode
+
+Run this command from the project root, or pass a target project path:
+
+```bash
+subconscious install opencode [path]
+```
+
+This command writes `.opencode/plugins/subconscious.js` in that project only. It preserves unrelated project files, refuses to overwrite a conflicting target it does not own, and rerunning it changes nothing when the generated file is already current.
+
+The shipped adapter is tested against OpenCode 1.18.23 and plugin SDK 1.2.27. The generated plugin observes `session.created`, `chat.message`, terminal `message.part.updated` tool parts only when `observer.mid_turn` is enabled, `session.status` when it turns idle, and `session.deleted` plus server disposal for deterministic session-end signals. `tool.execute.after` is observation-free because OpenCode 1.18.23 fires it before terminal tool state commits. Child sessions keep separate route identities.
+
+OpenCode transcript deltas come from the official `client.session.messages` API. The plugin forwards a bounded recent snapshot, and the adapter normalizes it into stable `key#version` records so mutable same-ID content replays the visible tail instead of being skipped. This is what keeps streaming rewrites and bounded-tail truncation from silently dropping context.
+
+Passive delivery uses two host-specific channels. At the prompt boundary, after `chat.message` has captured the original prompt for observation, the plugin leases the delivery window and appends one synthetic text part containing the combined status-plus-whisper block to `output.parts`; acknowledgement follows only after that append succeeds. This is the reliable resumed-session channel, and transcript normalization ignores that synthetic part. `experimental.chat.system.transform` remains the mid-turn model-step channel for whispers produced after the prompt while a turn is already running; it appends whispers there and acknowledges after that mutation succeeds. OpenCode does not support `queue_message`, and pending-delivery cleanup after session end remains TTL-based rather than forced by the harness.
+
+With `observer.mid_turn = true`, each observed tool boundary costs one local snapshot fetch and one local broker enqueue attempt, not an observer turn by itself. The broker still coalesces busy runs behind `mid_turn_min_tool_calls` and `mid_turn_min_seconds`, so the cost is bounded by those thresholds rather than by raw tool count.
+
 ## Operate the broker
 
 Hooks start the broker when necessary. You can also control it directly:
@@ -238,6 +257,7 @@ State lives in `~/.letta/subconscious/`. Set `SUBCONSCIOUS_HOME` to use a differ
 - The broker writes state atomically.
 - Native transcript markers prevent duplicate observer turns in Claude Code and Codex.
 - Letta Code uses a native turn ID when available. Current Letta Code hooks have no turn ID, so the adapter uses a unique occurrence ID rather than dropping identical turns.
+- OpenCode uses a bounded snapshot tail and a `key#version` cursor marker, so mutable same-ID transcript rewrites replay the visible tail instead of being skipped.
 - A stable delivery ID prevents normal duplicate delivery records.
 - A delivery remains pending until its adapter acknowledges it.
 - A crash after injection but before acknowledgement can repeat the same delivery ID.
@@ -261,6 +281,7 @@ The approved design is in [`specs/SPEC-0000-harness-neutral-subconscious.md`](sp
 
 - The first implementation targets Letta Cloud.
 - Harness queue delivery remains disabled until each native queue passes a live acceptance test.
+- OpenCode's adapter, installer, snapshot replay, generated-plugin bridge, and real CLI/model delivery path are covered by focused tests. The live suite proves a resumed OpenCode session receives a seeded whisper on the prompt boundary, that the observer sees the terminal bash result through the post-commit tool path, and that the whisper reaches only the intended session.
 - Current Letta Code Stop hooks omit the conversation ID and strip conversation environment variables. The adapter observes `SessionStart` and `UserPromptSubmit` safely. Completed-turn observation needs a Letta Code hook contract update.
 - The redaction interface is planned, but the first implementation has no general redaction engine.
 - An existing observer agent can have server-side tools. The Subconscious client allowlist does not control those tools.

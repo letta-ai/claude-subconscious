@@ -3,7 +3,7 @@
 Status: research-backed planning snapshot, 2026-08-25
 
 This document prioritizes the next Subconscious harness adapters after Claude
-Code, Codex, and Letta Code. It combines the token-activity ranking supplied by
+Code, Codex, Letta Code, Hermes, and OpenCode. It combines the token-activity ranking supplied by
 Cameron with integration feasibility and implementation leverage.
 
 The token numbers are a reach signal, not market share. One automated workload
@@ -29,12 +29,13 @@ In order of importance:
 
 ## Current coverage
 
-| Harness | Ranking signal | State |
-| --- | ---: | --- |
-| Claude Code | 940B | Supported |
-| Codex | 191B | Supported |
-| Letta Code | Not shown | Supported |
-| Hermes Agent | 2.67T | Supported (adapter shipped; live whisper read-back pending) |
+| Harness      | Ranking signal | State                                                       |
+| ------------ | -------------: | ----------------------------------------------------------- |
+| Claude Code  |           940B | Supported                                                   |
+| Codex        |           191B | Supported                                                   |
+| Letta Code   |      Not shown | Supported                                                   |
+| Hermes Agent |          2.67T | Supported (adapter shipped; live whisper read-back pending) |
+| OpenCode     |      Not shown | Supported                                                   |
 
 These adapters remain the compatibility baseline. A new adapter should not be
 called complete merely because it can run a command on `Stop`; it must meet the
@@ -122,8 +123,8 @@ events.
   `tool_result`, and `session_stop`; pi exposes the same core shape plus an
   `agent_settled` boundary.
 - Both expose `sendMessage()` with `deliverAs: "steer" | "followUp" |
-  "nextTurn"`, optional `triggerTurn`, and custom messages with `display:
-  false`. That directly represents passive hidden context, mid-run steering,
+"nextTurn"`, optional `triggerTurn`, and custom messages with `display:
+false`. That directly represents passive hidden context, mid-run steering,
   and proactive queued turns.
 - Both expose transcript trees and stable session identity through
   `ctx.sessionManager`.
@@ -136,12 +137,12 @@ binary compatibility merely because of shared ancestry.
 its hook, SDK, RPC, and steering surfaces are explicit; port the normalized core
 to upstream pi immediately afterward.
 
-### 4. Kilo / OpenCode plugin family
+### 4. Kilo plugin family
 
-**Signal:** Kilo Code 461B; OpenCode was not shown in the supplied top twenty.
+**Signal:** Kilo Code 461B.
 
-Kilo's current plugin API exposes the OpenCode-style internal event bus,
-including `session.created`, `session.idle`, `session.error`,
+Kilo's current plugin API exposes the same internal event-bus family OpenCode
+uses, including `session.created`, `session.idle`, `session.error`,
 `message.updated`, `tool.execute.before`, and `tool.execute.after`. Plugins work
 in both the Kilo CLI and VS Code extension. The plugin receives stable
 `sessionID` values and can participate directly in chat and tool processing.
@@ -150,13 +151,9 @@ and system transforms; intentional proactive delivery can use SDK
 `session.promptAsync()`. Because plugin hooks are awaited sequentially, the
 adapter must only enqueue local work before returning.
 
-The priority is not just Kilo. A careful normalization layer may also support
-OpenCode and other compatible forks, producing more leverage than the displayed
-Kilo number alone suggests. Compatibility must be verified against package
-types; it must not be inferred from branding.
+OpenCode compatibility is now implemented and live-tested against OpenCode 1.18.23 / plugin SDK 1.2.27. The shipped design uses `chat.message` synthetic prompt context for resumed-session delivery, `experimental.chat.system.transform` for mid-turn delivery after the prompt, and terminal `message.part.updated` as the canonical tool observation seam. The next leverage play in this family is Kilo: reuse the same normalization ideas where the host types and behavior actually match, rather than inferring compatibility from branding.
 
-**Decision:** implement as a native plugin family, with Kilo as the first tested
-host and OpenCode compatibility as an explicit second target.
+**Decision:** implement Kilo next as the second tested host in this plugin family, reusing the OpenCode bridge and snapshot patterns where the contracts truly align.
 
 ### 5. Cline
 
@@ -285,14 +282,14 @@ upstream hook surface.
 
 ## Items in the ranking that are not current harness targets
 
-| Rank | Product | Signal | Disposition |
-| ---: | --- | ---: | --- |
-| 12 | Nous Research API | 140B | Research/model API, not an interactive harness target |
-| 13 | Cheaper Inference | 106B | Inference service, not a harness |
-| 16 | Framer | 66.1B | Product-building application; requires a separate product API investigation |
-| 17 | ISEKAI ZERO | 63.3B | Game, not a harness |
-| 18 | HighLevel | 63.3B | SaaS platform, not presently an agent-harness target |
-| 20 | Hello Minds | 48.6B | Personal/creative agent product; no verified developer lifecycle surface yet |
+| Rank | Product           | Signal | Disposition                                                                  |
+| ---: | ----------------- | -----: | ---------------------------------------------------------------------------- |
+|   12 | Nous Research API |   140B | Research/model API, not an interactive harness target                        |
+|   13 | Cheaper Inference |   106B | Inference service, not a harness                                             |
+|   16 | Framer            |  66.1B | Product-building application; requires a separate product API investigation  |
+|   17 | ISEKAI ZERO       |  63.3B | Game, not a harness                                                          |
+|   18 | HighLevel         |  63.3B | SaaS platform, not presently an agent-harness target                         |
+|   20 | Hello Minds       |  48.6B | Personal/creative agent product; no verified developer lifecycle surface yet |
 
 Exclusion is not a judgment about product importance. It means the screenshot
 does not establish a compatible session lifecycle that Subconscious can observe.
@@ -321,14 +318,14 @@ tested:
 
 ## Suggested delivery waves
 
-| Wave | Targets | Goal |
-| --- | --- | --- |
-| 0 | Claude Code, Codex, Letta Code | Keep current baseline green |
-| 1 | Hermes, DeepSeek Harness | Cover the two highest-priority standalone targets |
-| 2 | omp + pi, Kilo + OpenCode | Build reusable family-level normalization cores |
-| 3 | Cline, Cursor, ZCode | Cover plugin/hook-driven desktop and CLI coding agents |
-| 4 | OpenClaw, Command Code, OpenHands | Expand beyond local coding-hook integrations |
-| Blocked | Zazen/Freebuff | Resolve product identity or obtain a supported lifecycle surface |
+| Wave    | Targets                           | Goal                                                             |
+| ------- | --------------------------------- | ---------------------------------------------------------------- |
+| 0       | Claude Code, Codex, Letta Code    | Keep current baseline green                                      |
+| 1       | Hermes, DeepSeek Harness          | Cover the two highest-priority standalone targets                |
+| 2       | omp + pi, Kilo                    | Build reusable family-level normalization cores                  |
+| 3       | Cline, Cursor, ZCode              | Cover plugin/hook-driven desktop and CLI coding agents           |
+| 4       | OpenClaw, Command Code, OpenHands | Expand beyond local coding-hook integrations                     |
+| Blocked | Zazen/Freebuff                    | Resolve product identity or obtain a supported lifecycle surface |
 
 ## Sources
 

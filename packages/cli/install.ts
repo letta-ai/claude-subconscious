@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { atomicWriteFile, type KnownHarnessId } from "../core/index.js";
 import { installAdapter as installHermesAdapter } from "./install-hermes.js";
+import { installOpencode } from "./install-opencode.js";
 
 interface CommandHook {
   type: "command";
@@ -171,6 +172,12 @@ export async function installAdapter(
         : `Allowlist entries already present in ${result.allowlistPath}.`,
     ];
     return parts.join("\n");
+  }
+  if (harness === "opencode") {
+    const result = await installOpencode(projectRoot ?? process.cwd());
+    return result.installed
+      ? `Installed the Subconscious plugin at ${result.path}. OpenCode picks it up on its next start.`
+      : `The Subconscious plugin is already installed at ${result.path}.`;
   }
   throw new Error(`Unsupported harness adapter: ${harness}`);
 }

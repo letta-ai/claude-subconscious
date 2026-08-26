@@ -144,8 +144,11 @@ const BROKER_READY_BUDGET_MS = 250;
  * Starting or replacing a broker is never waited out on the harness's clock.
  * The work is kicked off and this returns, because a broker that is not ready
  * yet is a reason to skip one boundary, not a reason to stall the session.
+ *
+ * Exported for the OpenCode bridge, which must keep the same startup,
+ * build-match, and bounded-budget behavior as every hook.
  */
-async function ensureBroker(): Promise<BrokerDescriptor | null> {
+export async function ensureBroker(): Promise<BrokerDescriptor | null> {
   const path = descriptorPath();
   const cliPath = brokerEntryPath();
   const build = await buildFingerprint(cliPath);

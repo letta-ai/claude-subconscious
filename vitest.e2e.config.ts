@@ -8,6 +8,7 @@ export default defineConfig({
     exclude: [
       "tests/e2e/model-overrides.e2e.test.ts",
       "tests/e2e/local-tools.e2e.test.ts",
+      "tests/e2e/opencode.e2e.test.ts",
     ],
     // Each case starts Claude Code and waits for a real turn, so they run one
     // file at a time rather than competing for the same broker.

@@ -246,6 +246,7 @@ describe("project configuration", () => {
         codex: { context_window_limit: 200000 },
         letta_code: { model: "openai/gpt-5.2" },
         hermes: { model: "anthropic/claude-opus-4.6" },
+        opencode: { model: "openai/gpt-5.4" },
       },
     });
     expect(config.modelOverrides?.claude_code).toEqual({
@@ -260,6 +261,9 @@ describe("project configuration", () => {
     });
     expect(config.modelOverrides?.hermes).toEqual({
       model: "anthropic/claude-opus-4.6",
+    });
+    expect(config.modelOverrides?.opencode).toEqual({
+      model: "openai/gpt-5.4",
     });
   });
 
@@ -511,10 +515,16 @@ describe("project configuration", () => {
   it("maps harness identifiers to underscored override keys", () => {
     const config = validateProjectConfig({
       version: 1,
-      model_overrides: { letta_code: { model: "openai/gpt-5.2" } },
+      model_overrides: {
+        letta_code: { model: "openai/gpt-5.2" },
+        opencode: { model: "openai/gpt-5.4" },
+      },
     });
     expect(resolveModelSelection(config, "letta-code").model).toBe(
       "openai/gpt-5.2",
+    );
+    expect(resolveModelSelection(config, "opencode").model).toBe(
+      "openai/gpt-5.4",
     );
   });
 });

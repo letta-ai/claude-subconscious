@@ -11,7 +11,7 @@ implementation_links: []
 
 ## Goal
 
-Build one local observer service for Claude Code, Codex, Letta Code, and later coding harnesses.
+Build one local observer service for Claude Code, Codex, Letta Code, Hermes, OpenCode, and later coding harnesses.
 
 Each harness adapter sends observations to the service. A persistent Letta agent reviews those observations and stays silent unless it has useful guidance.
 
@@ -68,6 +68,8 @@ packages/
   adapter-claude-code/  Claude Code hooks and plugin package
   adapter-codex/        Codex hooks and app-server integration
   adapter-letta-code/   Letta Code hooks and mod integration
+  adapter-hermes/       Hermes shell-hook adapter and transcript reader
+  adapter-opencode/     OpenCode plugin snapshot adapter
   cli/                  init, start, stop, restart, status, and adapter diagnostics
 ```
 
@@ -96,7 +98,7 @@ agent_id = "agent-..."
 model = "letta/auto"
 
 [model_overrides.claude_code]
-# Optional per-harness refinement. Keys: claude_code, codex, letta_code, hermes.
+# Optional per-harness refinement. Keys: claude_code, codex, letta_code, hermes, opencode.
 model = "anthropic/claude-sonnet-5"
 reasoning_effort = "high"
 context_window_limit = 200000
@@ -140,7 +142,7 @@ MemFS uses progressive disclosure. Compact facts needed in most turns belong und
 
 Agent SDK 0.7.6 applies an explicit project model as an override on the Subconscious conversation. Subconscious does not change unrelated conversations or the supplied agent's default model.
 
-The `model` key is optional. A file without one, and without a matching override table, passes no session model option at all: the observer inherits its agent's default. `[model_overrides.<harness>]` tables refine this per harness with keys `claude_code`, `codex`, and `letta_code`; unknown harness keys fail configuration loading offline. Each table accepts a non-empty `model`, a `reasoning_effort` from the SDK tier set, a positive whole-number `context_window_limit`, and a JSON-compatible `settings` table without null values. `reasoning_effort` and `settings` are mutually exclusive in one table because their precedence over each other would be ambiguous.
+The `model` key is optional. A file without one, and without a matching override table, passes no session model option at all: the observer inherits its agent's default. `[model_overrides.<harness>]` tables refine this per harness with keys `claude_code`, `codex`, `letta_code`, `hermes`, and `opencode`; unknown harness keys fail configuration loading offline. Each table accepts a non-empty `model`, a `reasoning_effort` from the SDK tier set, a positive whole-number `context_window_limit`, and a JSON-compatible `settings` table without null values. `reasoning_effort` and `settings` are mutually exclusive in one table because their precedence over each other would be ambiguous.
 
 Precedence is per harness: the harness override's model, else the project-wide `model`, else inheritance from the attached agent default. Fields an override omits fall back to the lower levels. Configuration loading validates structure only and never touches the network; a handle the backend does not know fails that observation clearly instead.
 
@@ -173,6 +175,8 @@ The adapter creates a stable event ID from native identity data when the harness
 Adapters send bounded turn data. They do not repeatedly send the full transcript after every turn.
 
 A `tool_result` event is a mid-turn boundary, and it carries route identity, the transcript path, the tool name, and whether the call reported an error. It does not carry the tool input or the tool output. Neither is read: the observation text comes from the transcript delta, which already contains the call and its result. Storing them would grow the state file on every tool call to hold what nothing looks at, and the broker rewrites that file on every mutation.
+
+OpenCode is the exception to the transcript-path detail, not to the boundedness rule. Its plugin fetches the transcript through the official `client.session.messages` API and forwards only a bounded recent snapshot. The adapter normalizes that snapshot into stable part records whose cursor marker is `key#version`, where `key` is the native part identity and `version` is a hash of the semantic content or terminal tool state. A part rewritten in place therefore replays the visible tail instead of reading as unchanged.
 
 ## Agent SDK boundary
 
@@ -432,6 +436,20 @@ Because one global broker may have been started by any harness, the broker's env
 
 The installer edits the active profile's `config.yaml` textually so user comments survive byte-for-byte, deduplicates per `(event, exact command)` so unrelated hooks on the same event are preserved, refuses flow-shaped `hooks:` blocks rather than corrupting them, and seeds exactly the four consent allowlist entries in `shell-hooks-allowlist.json` without touching `hooks_auto_accept`. A malformed or unreadable allowlist is reported, never overwritten. Capabilities: passive context yes, queued messages no, transcript file.
 
+### OpenCode
+
+OpenCode 1.18.23 with plugin SDK 1.2.27 exposes a typed plugin surface rather than command hooks. The generated project-local plugin at `.opencode/plugins/subconscious.js` owns the native events and forwards normalized broker work over a local newline-delimited `subconscious opencode-bridge` subprocess.
+
+The plugin observes `session.created`, `chat.message`, terminal `message.part.updated` tool parts only when `observer.mid_turn` is enabled for that project, `session.status` on the transition into `idle`, and `session.deleted` plus server disposal for deterministic session-end records. `tool.execute.after` is deliberately observation-free because OpenCode 1.18.23 fires it before terminal tool state is committed. Child sessions keep separate session IDs and therefore separate routes. Repeated `idle` signals are ignored after the first transition, so one turn stops once.
+
+Prompt observations come from `chat.message` and carry only the submitted text parts. They do not fetch a transcript and do not advance the cursor. Mid-turn and completed-turn observations fetch a bounded recent transcript through `client.session.messages({ path: { id }, query: { directory } })`, attach any fetch failure as `snapshot_error`, and let the adapter derive tool failure from terminal tool-part state inside the canonical snapshot rather than from the tool hook itself.
+
+Passive delivery uses two channels because the host treats prompt and mid-turn context differently. At the prompt boundary, after `chat.message` has already captured the original prompt for observation, the plugin asks the broker for one delivery window and appends one synthetic text part to `output.parts`. That part carries the combined `<subconscious_status ... />` plus whisper block, with valid OpenCode part identity fields and `synthetic: true` so transcript normalization excludes it. This is the reliable resumed-session channel. `experimental.chat.system.transform` remains the mid-turn model-step channel for whispers produced after the prompt while a turn is already running; it appends whispers to `output.system` there and never replaces existing entries. In both paths acknowledgement is a second bridge request after the mutation succeeds. If that acknowledgement is lost, the same whisper may be leased again later, which preserves at-least-once delivery. OpenCode exposes no supported queued-turn path, so `queue_message` remains unavailable.
+
+`observer.mid_turn` saves OpenCode the expensive path when a project does not use it: the plugin checks project facts through the bridge before each terminal `message.part.updated` tool event, and on success it fetches one local snapshot and enqueues one local observation request per observed tool boundary. The broker still coalesces those records behind `mid_turn_min_tool_calls` and `mid_turn_min_seconds`, so the observer-turn cost stays bounded by the thresholds rather than by raw tool count.
+
+The installer writes only `.opencode/plugins/subconscious.js` under the selected project root. It is byte-stable and idempotent, rewrites only files carrying its ownership marker, and refuses a conflicting target rather than overwriting it. Session-end pending-delivery cleanup remains TTL-based; the adapter does not purge deliveries merely because the OpenCode session ended.
+
 ## Durable state
 
 The broker stores the following state:
@@ -580,6 +598,9 @@ The CLI provides the following commands:
 - [x] A hook that fails while writing leaves the whisper pending and delivers it at the next boundary.
 - [x] A whisper reaches only the session that earned it, and no whisper leaves a directory no project configures.
 - [x] A shutting-down broker finishes an observer turn already in flight, and its socket closes first, so stopping waits for the process rather than for the ping.
+- [x] OpenCode appends one combined status-plus-whisper block at the prompt boundary through a synthetic `chat.message` text part and acknowledges only after that append succeeds.
+- [x] OpenCode uses `experimental.chat.system.transform` only as the mid-turn whisper channel after the prompt boundary has passed.
+- [x] OpenCode child sessions keep separate routes, and session end does not force-delete pending deliveries ahead of TTL.
 
 ### Adapters
 
@@ -602,6 +623,8 @@ The CLI provides the following commands:
 - [x] A `tool_result` event carries route and tool identity only, never the tool input or the tool output.
 - [x] Adapters observe `PostToolUse` and not `PreToolUse`, and a mid-turn observation advances the same transcript cursor as the completed turn.
 - [x] Two tool calls in one turn produce two event IDs even when the transcript marker has not moved.
+- [x] OpenCode transcript snapshots normalize to bounded `key#version` records, so mutable same-ID rewrites replay the visible tail instead of being skipped.
+- [x] The OpenCode adapter proves observation and passive whisper delivery through a real OpenCode CLI/model turn, including resumed-session prompt delivery and post-commit terminal tool observation.
 - [x] A live session proves that a mid-turn whisper reaches the coding agent at a tool boundary inside the turn.
 
 ### Product validation

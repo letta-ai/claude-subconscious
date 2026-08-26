@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { claudeCodeAdapter } from "../packages/adapter-claude-code/index.js";
 import { codexAdapter } from "../packages/adapter-codex/index.js";
 import { lettaCodeAdapter } from "../packages/adapter-letta-code/index.js";
+import { opencodeAdapter } from "../packages/adapter-opencode/index.js";
 import { enrichHookInput, formatHookOutput } from "../packages/cli/hook.js";
 
 describe("hook context", () => {
@@ -125,7 +126,12 @@ describe("adapter context channels", () => {
   });
 
   it("claims nothing on events no harness reads", () => {
-    for (const adapter of [claudeCodeAdapter, codexAdapter, lettaCodeAdapter]) {
+    for (const adapter of [
+      claudeCodeAdapter,
+      codexAdapter,
+      lettaCodeAdapter,
+      opencodeAdapter,
+    ]) {
       expect(adapter.contextChannel("PreCompact")).toBeNull();
       expect(adapter.contextChannel("SessionEnd")).toBeNull();
     }

@@ -5,6 +5,7 @@ export const HARNESS_IDS = [
   "codex",
   "letta-code",
   "hermes",
+  "opencode",
 ] as const;
 
 export type KnownHarnessId = (typeof HARNESS_IDS)[number];
@@ -20,6 +21,7 @@ export const MODEL_OVERRIDE_KEYS = [
   "codex",
   "letta_code",
   "hermes",
+  "opencode",
 ] as const;
 
 export type ModelOverrideKey = (typeof MODEL_OVERRIDE_KEYS)[number];
@@ -64,6 +66,7 @@ export interface ModelOverridesConfig {
   codex?: ModelOverride;
   letta_code?: ModelOverride;
   hermes?: ModelOverride;
+  opencode?: ModelOverride;
 }
 
 /** Where the effective observer model came from, in precedence order. */
