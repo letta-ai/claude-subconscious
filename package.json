@@ -1,8 +1,65 @@
 {
-  "name": "claude-subconscious",
-  "version": "2.1.1",
-  "description": "A subconscious for Claude Code. A Letta agent watches your sessions, accumulates context, and whispers guidance back.",
-  "author": "Letta <hello@letta.com> (https://letta.com)",
+  "name": "@letta-ai/subconscious",
+  "version": "0.1.0",
+  "description": "A harness-neutral observer that gives coding agents persistent, selective guidance.",
+  "type": "module",
+  "bin": {
+    "subconscious": "./dist/packages/cli/cli.js"
+  },
+  "files": [
+    ".claude-plugin",
+    "dist",
+    "hooks",
+    "packages",
+    "specs",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts",
+    "test:model-e2e": "npm run build && vitest run --config vitest.model-e2e.config.ts",
+    "test:codex-e2e": "npm run build && vitest run --config vitest.codex-e2e.config.ts",
+    "test:hermes-e2e": "npm run build && vitest run --config vitest.hermes-e2e.config.ts",
+    "test:letta-code-e2e": "npm run build && vitest run --config vitest.letta-code-e2e.config.ts",
+    "test:letta-cloud-queue-e2e": "npm run build && vitest run --config vitest.letta-cloud-queue-e2e.config.ts",
+    "test:opencode-e2e": "npm run build && vitest run --config vitest.opencode-e2e.config.ts",
+    "test:sandbox-e2e": "npm run build && vitest run --config vitest.sandbox-e2e.config.ts",
+    "format:check": "prettier --check \"packages/**/*.ts\" \"tests/**/*.ts\" \"scripts/check-specs.ts\" \"specs/SPEC-*.md\" README.md package.json tsconfig.json tsconfig.build.json vitest.config.ts vitest.e2e.config.ts vitest.model-e2e.config.ts vitest.codex-e2e.config.ts vitest.hermes-e2e.config.ts vitest.letta-code-e2e.config.ts vitest.letta-cloud-queue-e2e.config.ts vitest.opencode-e2e.config.ts vitest.sandbox-e2e.config.ts hooks/hooks.json \".claude-plugin/plugin.json\" \".github/workflows/ci.yml\"",
+    "package:check": "npm pack --dry-run",
+    "spec:check": "tsx scripts/check-specs.ts",
+    "check": "npm run spec:check && npm run format:check && npm run typecheck && npm run test && npm run build && npm run package:check",
+    "prepare": "npm run build"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@letta-ai/letta-agent-sdk": "0.7.6",
+    "smol-toml": "1.8.0",
+    "tsx": "^4.20.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.1",
+    "prettier": "3.6.2",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9",
+    "sharp": "0.35.3",
+    "ws": "8.21.3"
+  },
+  "keywords": [
+    "agents",
+    "claude-code",
+    "codex",
+    "letta",
+    "memory",
+    "subconscious"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -11,34 +68,5 @@
   "homepage": "https://github.com/letta-ai/claude-subconscious#readme",
   "bugs": {
     "url": "https://github.com/letta-ai/claude-subconscious/issues"
-  },
-  "keywords": [
-    "claude",
-    "claude-code",
-    "letta",
-    "subconscious",
-    "memory",
-    "multi-agent",
-    "async",
-    "deliberation"
-  ],
-  "type": "module",
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "scripts": {
-    "sync": "tsx scripts/sync_letta_memory.ts",
-    "send": "tsx scripts/send_messages_to_letta.ts",
-    "test": "vitest run",
-    "test:watch": "vitest"
-  },
-  "dependencies": {
-    "@letta-ai/letta-code-sdk": "^0.1.0",
-    "tsx": "^4.7.0"
-  },
-  "devDependencies": {
-    "@types/node": "^20.10.0",
-    "typescript": "^5.3.0",
-    "vitest": "^3.0.0"
   }
 }

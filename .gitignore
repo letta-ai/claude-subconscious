@@ -6,6 +6,10 @@ node_modules/
 session-*.json
 conversations.json
 
+# Project config (names a personal agent; two configs naming one agent share
+# its memory, so each contributor runs `subconscious init` for their own)
+subconscious.toml
+
 # Claude Code local state
 .claude/
 
