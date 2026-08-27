@@ -165,7 +165,7 @@ The plugin runs `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
 subconscious install codex
 ```
 
-This command adds Subconscious hooks to `~/.codex/hooks.json`. It preserves existing hooks. Passive delivery is claimed from the Codex 0.147.0 hook schema. A real Codex CLI test is still pending.
+This command adds Subconscious hooks to `~/.codex/hooks.json`. It preserves existing hooks. A real Codex 0.149.1 suite proves nearest-project discovery, prompt and tool observations, prompt and tool-boundary passive delivery, rollout-transcript context, and cross-session isolation.
 
 ### Letta Code
 
@@ -258,7 +258,7 @@ State lives in `~/.letta/subconscious/`. Set `SUBCONSCIOUS_HOME` to use a differ
 
 - The broker writes state atomically.
 - Native transcript markers prevent duplicate observer turns in Claude Code and Codex.
-- Letta Code uses a native turn ID when available. Current Letta Code hooks have no turn ID, so the adapter uses a unique occurrence ID rather than dropping identical turns.
+- Letta Code scopes route identity by both agent and conversation. This matters for the local backend, where each agent's first conversation is named `default`. It uses a native turn ID when available. Current hooks have no turn ID, so the adapter uses a unique occurrence ID rather than dropping identical turns.
 - OpenCode uses a bounded snapshot tail and a `key#version` cursor marker, so mutable same-ID transcript rewrites replay the visible tail instead of being skipped.
 - A stable delivery ID prevents normal duplicate delivery records.
 - A delivery remains pending until its adapter acknowledges it.
@@ -282,10 +282,10 @@ The approved design is in [`specs/SPEC-0000-harness-neutral-subconscious.md`](sp
 ## Current limits
 
 - The first implementation targets Letta Cloud.
-- Queue delivery is enabled only for Letta Code. Broker tests cover `queue_message`; a live turn into a running conversation is still pending.
-- Codex passive delivery is claimed from the 0.147.0 hook schema. A real Codex CLI test is still pending.
-- Hermes live whisper read-back against `hermes chat` is still pending.
-- OpenCode's adapter, installer, snapshot replay, generated-plugin bridge, and real CLI/model delivery path are covered by focused tests. The live suite proves a resumed OpenCode session receives a seeded whisper on the prompt boundary, that the observer sees the terminal bash result through the post-commit tool path, and that the whisper reaches only the intended session. Mid-turn `experimental.chat.system.transform` delivery is covered by plugin tests, not that live suite.
-- Current Letta Code Stop hooks omit the conversation ID and strip conversation environment variables. The adapter observes `SessionStart` and `UserPromptSubmit` safely. Completed-turn observation needs a Letta Code hook contract update. Passive delivery through a real Letta Code turn is still pending.
+- Queue delivery is enabled only for Letta Code. A live Cloud test through an owned Letta Code App Server proves terminal acknowledgement, `nativeReceipt`, model read-back, and cross-conversation isolation. The local 0.30.32 path has a provider-specific limitation: its App Server persists the queued canary and emits `turn_finished`, but Agent SDK 0.7.6 waits for absent `usage_statistics`. The runtime bounds this wait at five minutes instead of pinning the broker. Before retrying a send it checks the target conversation for the delivery OTID, so the next drain acknowledges a persisted first attempt without sending a duplicate turn.
+- Codex 0.149.1 live tests cover nearest-project discovery, prompt and tool observations, prompt and tool-boundary passive delivery, rollout-transcript context, and cross-session isolation.
+- Hermes 0.20.5 live tests cover `state.db` observations, wrong-session isolation, and `pre_llm_call` whisper read-back on an exact-session resume.
+- OpenCode's live suite proves resumed-session prompt delivery, post-commit terminal tool observation, session isolation, and same-turn model read-back of a whisper produced after that tool observation through `experimental.chat.system.transform`.
+- Current Letta Code Stop hooks omit the conversation ID and strip conversation environment variables. The adapter observes `SessionStart` and `UserPromptSubmit` safely. Completed-turn observation needs a Letta Code hook contract update. Passive delivery through a real turn is still pending: headless turns fire neither boundary, while an isolated 0.30.32 PTY fired `SessionStart` but restored the composed prompt unsent before `UserPromptSubmit`.
 - The redaction interface is planned, but the first implementation has no general redaction engine.
 - An existing observer agent can have server-side tools. The Subconscious client allowlist does not control those tools.

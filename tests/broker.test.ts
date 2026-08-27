@@ -7,6 +7,7 @@ import {
   SubconsciousBroker,
   type BrokerRuntime,
 } from "../packages/cli/broker.js";
+import { lettaCodeAdapter } from "../packages/adapter-letta-code/index.js";
 import {
   deliveryId,
   routeKey,
@@ -1640,6 +1641,145 @@ describe("direct queued messages", () => {
       expect(
         leased.ok && leased.type === "leased" ? leased.deliveries : [],
       ).toHaveLength(0);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("keeps two agents that share the local conversation name apart", async () => {
+    // Letta Code 0.30.32 names the first local conversation of every agent
+    // `default`, and both hooks reach one broker in one project. A route keyed
+    // from the conversation alone would hand them a single route: one agent's
+    // hook would lease the other's whisper, and the queued message would be
+    // addressed to whichever agent observed last.
+    const directory = await project();
+    const descriptor = socket(directory, "collision");
+    const sent: QueuedMessageDelivery[] = [];
+    const runtime: BrokerRuntime = {
+      run: async (
+        input: RunObservationInput,
+      ): Promise<RunObservationResult> => {
+        const agentId = String(input.event.payload.agent_id);
+        const delivery = {
+          routeKey: input.route.key,
+          observationId: input.event.id,
+          priority: "normal" as const,
+          status: "pending" as const,
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          attempts: 0,
+        };
+        await input.persistDelivery({
+          ...delivery,
+          id: deliveryId(input.event.id, "whisper", "proof"),
+          kind: "whisper",
+          dedupeKey: "proof",
+          text: `Whisper for ${agentId}.`,
+        });
+        await input.persistDelivery({
+          ...delivery,
+          id: deliveryId(input.event.id, "queued_message", "act-now"),
+          kind: "queued_message",
+          dedupeKey: "act-now",
+          text: `Message for ${agentId}.`,
+        });
+        return {
+          status: "success",
+          effectiveModel: null,
+          conversationId: "conv-observer",
+          result: {
+            type: "result",
+            success: true,
+            durationMs: 1,
+            conversationId: "conv-observer",
+            runIds: ["run-observer"],
+          },
+        };
+      },
+      deliverQueuedMessage: async (input) => {
+        sent.push(input);
+        return { status: "delivered" };
+      },
+    };
+    const broker = new SubconsciousBroker({
+      descriptor,
+      stateDirectory: directory,
+      runtime,
+    });
+    await broker.start();
+    try {
+      const agents = ["agent-one", "agent-two"];
+      for (const agentId of agents) {
+        const event = await lettaCodeAdapter.normalizeHookInput({
+          event_type: "UserPromptSubmit",
+          working_directory: directory,
+          conversation_id: "default",
+          agent_id: agentId,
+          prompt: `Ship the release for ${agentId}.`,
+        });
+        expect(event?.sessionId).toBe(`${agentId}:default`);
+        await sendBrokerRequest(descriptor, { type: "observe", event: event! });
+      }
+      await waitFor(async () => {
+        const records = Object.values(await deliveries(descriptor));
+        return (
+          records.filter((record) => record.kind === "whisper").length === 2 &&
+          sent.length === 2
+        );
+      });
+
+      const status = await sendBrokerRequest(descriptor, { type: "status" });
+      if (!status.ok || status.type !== "status")
+        throw new Error("Missing broker status.");
+      const routes = Object.values(status.state.routes);
+      expect(routes.map((route) => route.sessionId).sort()).toEqual([
+        "agent-one:default",
+        "agent-two:default",
+      ]);
+      expect(new Set(routes.map((route) => route.key)).size).toBe(2);
+      expect(
+        new Set(
+          Object.values(await deliveries(descriptor)).map(
+            (record) => record.routeKey,
+          ),
+        ).size,
+      ).toBe(2);
+
+      // Each hook leases its own agent's whisper and nothing else.
+      for (const agentId of agents) {
+        const leased = await sendBrokerRequest(descriptor, {
+          type: "lease",
+          target: {
+            harness: "letta-code",
+            sessionId: `${agentId}:default`,
+            workingDirectory: directory,
+          },
+          kind: "whisper",
+        });
+        expect(
+          leased.ok && leased.type === "leased"
+            ? leased.deliveries.map((record) => record.text)
+            : [],
+        ).toEqual([`Whisper for ${agentId}.`]);
+      }
+
+      // The queue is still addressed to the conversation Letta Code reported.
+      expect(
+        sent
+          .map((message) => ({ ...message.identity, text: message.text }))
+          .sort((left, right) => left.agentId.localeCompare(right.agentId)),
+      ).toEqual([
+        {
+          agentId: "agent-one",
+          conversationId: "default",
+          text: "Message for agent-one.",
+        },
+        {
+          agentId: "agent-two",
+          conversationId: "default",
+          text: "Message for agent-two.",
+        },
+      ]);
     } finally {
       await broker.close();
     }

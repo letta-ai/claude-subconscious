@@ -41,6 +41,10 @@ const children: ChildProcess[] = [];
 const servers: Server[] = [];
 const preparedTexts: string[] = [];
 
+interface FixtureRuntime {
+  run(input: unknown): Promise<RunObservationResult>;
+}
+
 const silentObserver = {
   run: async (input: {
     prepared: { text: string };
@@ -90,6 +94,7 @@ interface Fixture {
   descriptor: BrokerDescriptor;
   serverUrl: string;
   server: OwnedChild;
+  runtime: FixtureRuntime;
 }
 
 afterEach(async () => {
@@ -245,11 +250,12 @@ function exactEnvironment(paths: {
 async function startBroker(
   subconsciousHome: string,
   descriptor: BrokerDescriptor,
+  runtime: FixtureRuntime,
 ): Promise<SubconsciousBroker> {
   const broker = new SubconsciousBroker({
     descriptor,
     stateDirectory: subconsciousHome,
-    runtime: silentObserver,
+    runtime,
   });
   brokers.push(broker);
   await broker.start();
@@ -260,7 +266,9 @@ async function startBroker(
   return broker;
 }
 
-async function fixture(): Promise<Fixture> {
+async function fixture(
+  runtime: FixtureRuntime = silentObserver,
+): Promise<Fixture> {
   const rootDir = await root("fixture");
   const project = join(rootDir, "project");
   const home = join(rootDir, "home");
@@ -360,7 +368,7 @@ if (!bridgeMode) {
     startedAt: new Date().toISOString(),
     build: await buildFingerprint(brokerEntry),
   };
-  await startBroker(subconsciousHome, descriptor);
+  await startBroker(subconsciousHome, descriptor, runtime);
   const port = await openPort();
   const server = trackChild(
     spawn(
@@ -385,6 +393,7 @@ if (!bridgeMode) {
     descriptor,
     serverUrl: `http://127.0.0.1:${port}`,
     server,
+    runtime,
   };
 }
 
@@ -686,11 +695,59 @@ async function seedPendingWhisper(
   };
   state.deliveries[delivery.id] = delivery;
   await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
-  await startBroker(active.subconsciousHome, active.descriptor);
+  await startBroker(active.subconsciousHome, active.descriptor, active.runtime);
   return delivery.id;
 }
 
+function whisperingObserver(canary: string) {
+  let seeded = false;
+  return {
+    run: async (input: {
+      event: { id: string; sessionId: string; type: HarnessEventType };
+      route: { key: string };
+      prepared: { text: string };
+      persistDelivery(delivery: DeliveryRecord): Promise<void>;
+    }): Promise<RunObservationResult> => {
+      preparedTexts.push(input.prepared.text);
+      if (
+        !seeded &&
+        input.event.type === "tool_result" &&
+        input.prepared.text.includes("[OpenCode tool call: bash]") &&
+        input.prepared.text.includes("SUBCONSCIOUS_E2E_TOOL_OK")
+      ) {
+        seeded = true;
+        await input.persistDelivery({
+          id: deliveryId(input.event.id, "whisper", `midturn-${canary}`),
+          routeKey: input.route.key,
+          observationId: input.event.id,
+          kind: "whisper",
+          text: canary,
+          priority: "normal",
+          dedupeKey: `midturn-${canary}`,
+          status: "pending",
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          attempts: 0,
+        });
+      }
+      return {
+        status: "success",
+        conversationId: "conv-observer",
+        result: {
+          type: "result",
+          success: true,
+          durationMs: 1,
+          conversationId: "conv-observer",
+          runIds: ["run-observer"],
+        },
+        effectiveModel: null,
+      };
+    },
+  };
+}
+
 beforeAll(async () => {
+  if (process.env.SUBCONSCIOUS_OPENCODE_LIVE !== "1") return;
   await access(brokerEntry).catch(() => {
     throw new Error(
       `No broker build at ${brokerEntry}. Run npm run build first.`,
@@ -721,7 +778,10 @@ beforeAll(async () => {
   );
 });
 
-describe("OpenCode live end-to-end", () => {
+const liveDescribe =
+  process.env.SUBCONSCIOUS_OPENCODE_LIVE === "1" ? describe : describe.skip;
+
+liveDescribe("OpenCode live end-to-end", () => {
   it(
     "observes a real tool turn and then delivers one seeded whisper only into the same session",
     { timeout: 480_000 },
@@ -920,6 +980,131 @@ describe("OpenCode live end-to-end", () => {
             String(part.text).includes(canary),
         );
       expect(otherSyntheticCanary).toHaveLength(0);
+    },
+  );
+
+  it(
+    "delivers a mid-turn whisper through experimental.chat.system.transform only after the real terminal bash observation",
+    { timeout: 480_000 },
+    async () => {
+      const canary = `MID-${randomUUID().replaceAll("-", "").slice(0, 16)}`;
+      const active = await fixture(whisperingObserver(canary));
+      const prompt =
+        "Use exactly one Bash tool call with command: printf SUBCONSCIOUS_E2E_TOOL_OK. Use no other tools. After the tool call completes, inspect the full context available to you, including system messages. If you can see any <subconscious_whisper ...>TEXT</subconscious_whisper> block at that point, reply with exactly TEXT and nothing else. Otherwise reply with exactly BASELINE and nothing else.";
+
+      const firstPreparedIndex = preparedTexts.length;
+      const first = await runTurn(active, prompt);
+      const sessionId = first.sessionId;
+      const firstObserved = await waitForObservationSet(active, sessionId, {
+        session_start: 1,
+        user_prompt: 1,
+        tool_result: 1,
+        turn_stop: 1,
+      });
+      const routeKeyValue = firstObserved.key;
+      expect(routeKeyValue).toBeTruthy();
+
+      const firstExport = await exportSession(active, sessionId);
+      expect(assistantTexts(firstExport).at(-1)).toBe(canary);
+      const firstTools = terminalToolParts(firstExport);
+      expect(firstTools).toHaveLength(1);
+      expect(firstTools[0]).toMatchObject({
+        tool: "bash",
+        state: {
+          status: "completed",
+          output: "SUBCONSCIOUS_E2E_TOOL_OK",
+          input: { command: "printf SUBCONSCIOUS_E2E_TOOL_OK" },
+        },
+      });
+
+      const firstPrepared = preparedTexts.slice(firstPreparedIndex);
+      expect(
+        firstPrepared.some(
+          (text) =>
+            text.includes("[OpenCode tool call: bash]") &&
+            text.includes("SUBCONSCIOUS_E2E_TOOL_OK"),
+        ),
+      ).toBe(true);
+      expect(
+        firstPrepared.some((text) => text.includes(`OpenCode:\n${canary}`)),
+      ).toBe(true);
+
+      const stateAfterA = await poll(
+        async () => await brokerState(active),
+        120_000,
+        () => `broker state for ${sessionId}`,
+        (state) =>
+          Object.values(state.deliveries).some(
+            (delivery) =>
+              delivery.routeKey === routeKeyValue &&
+              delivery.text === canary &&
+              delivery.status === "delivered" &&
+              Boolean(delivery.acknowledgedAt),
+          ),
+      );
+      const canaryDelivery = Object.values(stateAfterA.deliveries).find(
+        (delivery) =>
+          delivery.routeKey === routeKeyValue && delivery.text === canary,
+      );
+      expect(canaryDelivery).toBeDefined();
+      expect(canaryDelivery?.status).toBe("delivered");
+      expect(canaryDelivery?.acknowledgedAt).toBeTruthy();
+
+      const logs = await bridgeEntries(active);
+      const parsedBridge = logs
+        .filter(
+          (entry) =>
+            entry.direction === "out" && typeof entry.line === "string",
+        )
+        .map((entry) => {
+          try {
+            return JSON.parse(String(entry.line)) as Record<string, unknown>;
+          } catch {
+            return null;
+          }
+        })
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry));
+      const windows = parsedBridge.filter((entry) => "deliveries" in entry);
+      expect(windows.length).toBeGreaterThanOrEqual(2);
+      expect(windows[0]?.deliveries).toEqual([]);
+      expect(JSON.stringify(windows.slice(1))).toContain(canary);
+
+      const otherPreparedIndex = preparedTexts.length;
+      const other = await runTurn(active, prompt);
+      expect(other.sessionId).not.toBe(sessionId);
+      await waitForObservationSet(active, other.sessionId, {
+        session_start: 1,
+        user_prompt: 1,
+        tool_result: 1,
+        turn_stop: 1,
+      });
+      const otherExport = await exportSession(active, other.sessionId);
+      expect(assistantTexts(otherExport).at(-1)).toBe("BASELINE");
+      expect(JSON.stringify(otherExport)).not.toContain(canary);
+      expect(
+        preparedTexts
+          .slice(otherPreparedIndex)
+          .some((text) => text.includes(canary)),
+      ).toBe(false);
+      expect(
+        routeKeyForSession(await brokerState(active), other.sessionId),
+      ).not.toBe(routeKeyValue);
+
+      const nonSyntheticPromptText = firstExport.messages
+        .filter((message) => message.info?.role === "user")
+        .flatMap((message) =>
+          (message.parts ?? [])
+            .filter(
+              (part) =>
+                part.type === "text" &&
+                part.synthetic !== true &&
+                typeof part.text === "string",
+            )
+            .map((part) => String(part.text)),
+        )
+        .join("\n");
+      expect(nonSyntheticPromptText).not.toContain(canary);
+      expect(JSON.stringify(firstTools)).not.toContain(canary);
     },
   );
 });

@@ -744,6 +744,7 @@ export class SubconsciousBroker {
           result = await runtime.deliverQueuedMessage({
             identity,
             deliveryId: delivery.id,
+            previousAttempts: delivery.attempts,
             text: delivery.text,
           });
         } catch (error) {

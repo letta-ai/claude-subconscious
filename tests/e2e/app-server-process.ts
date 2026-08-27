@@ -78,7 +78,9 @@ function waitForExit(child: ChildProcess): Promise<void> {
   });
 }
 
-export function startOwnedAppServer(): Promise<OwnedAppServer> {
+export function startOwnedAppServer(
+  options: { env?: NodeJS.ProcessEnv } = {},
+): Promise<OwnedAppServer> {
   const child = spawn(
     process.execPath,
     [
@@ -89,7 +91,10 @@ export function startOwnedAppServer(): Promise<OwnedAppServer> {
       "--listen",
       "ws://127.0.0.1:0",
     ],
-    { stdio: ["ignore", "pipe", "pipe"] },
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, ...options.env },
+    },
   );
 
   return new Promise<OwnedAppServer>((resolve, reject) => {

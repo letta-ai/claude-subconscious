@@ -32,10 +32,10 @@ In order of importance:
 | Harness      | Ranking signal | State                                                                                          |
 | ------------ | -------------: | ---------------------------------------------------------------------------------------------- |
 | Claude Code  |           940B | Supported (live seeded whisper read-back at prompt and PostToolUse)                            |
-| Codex        |           191B | Adapter shipped (schema-backed delivery; real CLI proof pending)                               |
-| Letta Code   |      Not shown | Adapter shipped (queue path unit-tested; live passive delivery pending)                        |
-| Hermes Agent |          2.67T | Supported (adapter shipped; live whisper read-back pending)                                    |
-| OpenCode     |      Not shown | Supported (live resumed prompt delivery and terminal observation; mid-turn transform unit-tested) |
+| Codex        |           191B | Supported (live prompt/tool observation, delivery, and isolation)                              |
+| Letta Code   |      Not shown | Queue delivery proven live; passive PTY acceptance remains blocked                             |
+| Hermes Agent |          2.67T | Supported (live state.db observation and pre_llm_call read-back)                                |
+| OpenCode     |      Not shown | Supported (live prompt and mid-turn delivery plus terminal observation)                        |
 
 These adapters remain the compatibility baseline. A new adapter should not be
 called complete merely because it can run a command on `Stop`; it must meet the
@@ -151,7 +151,7 @@ and system transforms; intentional proactive delivery can use SDK
 `session.promptAsync()`. Because plugin hooks are awaited sequentially, the
 adapter must only enqueue local work before returning.
 
-OpenCode compatibility is implemented against OpenCode 1.18.23 / plugin SDK 1.2.27. Live tests cover resumed-session prompt delivery and post-commit terminal tool observation. Mid-turn `experimental.chat.system.transform` delivery is covered by plugin tests, not the live CLI suite. The shipped design uses `chat.message` synthetic prompt context for resumed-session delivery, `experimental.chat.system.transform` for mid-turn delivery after the prompt, and terminal `message.part.updated` as the canonical tool observation seam. The next leverage play in this family is Kilo: reuse the same normalization ideas where the host types and behavior actually match, rather than inferring compatibility from branding.
+OpenCode compatibility is implemented against OpenCode 1.18.23 / plugin SDK 1.2.27. Live tests cover resumed-session prompt delivery, post-commit terminal tool observation, and same-turn model read-back of a whisper produced after that tool observation through `experimental.chat.system.transform`. The shipped design uses `chat.message` synthetic prompt context for resumed-session delivery, `experimental.chat.system.transform` for mid-turn delivery after the prompt, and terminal `message.part.updated` as the canonical tool observation seam. The next leverage play in this family is Kilo: reuse the same normalization ideas where the host types and behavior actually match, rather than inferring compatibility from branding.
 
 **Decision:** implement Kilo next as the second tested host in this plugin family, reusing the OpenCode bridge and snapshot patterns where the contracts truly align.
 

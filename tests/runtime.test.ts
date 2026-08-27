@@ -997,6 +997,7 @@ describe("direct queued-message delivery", () => {
           if (conversation instanceof Error) throw conversation;
           return conversation;
         }),
+        listMessages: vi.fn(async () => ({ messages: [] })),
       },
       resumeSession: vi.fn(
         (_id: string, options: LettaCodeClientSessionOptions) => {
@@ -1176,6 +1177,130 @@ describe("direct queued-message delivery", () => {
     });
     expect(session.stream).toHaveBeenCalledOnce();
     expect(session.close).toHaveBeenCalledOnce();
+  });
+
+  it("returns retry when the queued-message stream never settles", async () => {
+    let releaseStream: (() => void) | undefined;
+    const neverResult = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const session = {
+      send: vi.fn(async () => {}),
+      close: vi.fn(() => {
+        releaseStream?.();
+      }),
+      conversationId: "conv-harness",
+      stream: vi.fn(() =>
+        (async function* () {
+          await neverResult;
+        })(),
+      ),
+    };
+    const { client } = harnessClient(
+      { id: "conv-harness", agent_id: "agent-harness" },
+      session,
+    );
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: client as unknown as LettaAgentClient,
+      queuedMessageTimeoutMs: 25,
+    });
+
+    const result = await runtime.deliverQueuedMessage({
+      identity,
+      deliveryId: "delivery-hang",
+      text: "Do not wait forever.",
+    });
+
+    expect(result.status).toBe("retry");
+    expect(result.error).toContain("timed out after 25ms");
+    expect(result.error).toContain("terminal SDK result");
+    expect(session.close).toHaveBeenCalledOnce();
+  });
+
+  it("acknowledges a persisted OTID on retry instead of sending a second turn", async () => {
+    const persisted: { otid?: string }[] = [];
+    let releaseStream: (() => void) | undefined;
+    const neverResult = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const session = {
+      send: vi.fn(async (_text: string, options?: { otid: string }) => {
+        persisted.push({ otid: options?.otid });
+      }),
+      close: vi.fn(() => {
+        releaseStream?.();
+      }),
+      conversationId: "conv-harness",
+      stream: vi.fn(() =>
+        (async function* () {
+          await neverResult;
+        })(),
+      ),
+    };
+    const { client } = harnessClient(
+      { id: "conv-harness", agent_id: "agent-harness" },
+      session,
+    );
+    client.conversations.listMessages = vi.fn(async () => ({
+      messages: [...persisted],
+    }));
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: client as unknown as LettaAgentClient,
+      queuedMessageTimeoutMs: 25,
+    });
+    const input = {
+      identity,
+      deliveryId: "delivery-hang",
+      text: "Do not wait forever.",
+    };
+
+    const first = await runtime.deliverQueuedMessage(input);
+    expect(client.conversations.listMessages).not.toHaveBeenCalled();
+    const second = await runtime.deliverQueuedMessage({
+      ...input,
+      previousAttempts: 1,
+    });
+
+    expect(first.status).toBe("retry");
+    expect(first.error).toContain("timed out after 25ms");
+    expect(second).toEqual({
+      status: "delivered",
+      nativeReceipt: "conv-harness",
+    });
+    expect(session.send).toHaveBeenCalledOnce();
+    expect(client.conversations.listMessages).toHaveBeenCalledWith(
+      "conv-harness",
+      expect.objectContaining({ limit: 100, order: "desc" }),
+    );
+    expect("list" in client.conversations).toBe(false);
+  });
+
+  it("keeps an OTID lookup failure retryable without sending", async () => {
+    const { client, session } = harnessClient({
+      id: "conv-harness",
+      agent_id: "agent-harness",
+    });
+    client.conversations.listMessages = vi.fn(async () => {
+      throw new Error("history unavailable");
+    });
+    const runtime = new AgentRuntime({
+      apiKey: "test-key",
+      client: client as unknown as LettaAgentClient,
+    });
+
+    const result = await runtime.deliverQueuedMessage({
+      identity,
+      deliveryId: "delivery-one",
+      previousAttempts: 1,
+      text: "Do not send this while history is unread.",
+    });
+
+    expect(result.status).toBe("retry");
+    expect(result.error).toContain("history unavailable");
+    expect(client.resumeSession).not.toHaveBeenCalled();
+    expect(session.send).not.toHaveBeenCalled();
   });
 
   it("sends once when startup recovery and the drain race on one record", async () => {

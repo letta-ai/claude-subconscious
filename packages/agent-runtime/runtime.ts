@@ -44,6 +44,14 @@ const SANDBOX_OPTIONS: LettaCodeCloudSandboxOptions = {
   terminateOnClose: false,
 };
 
+/**
+ * Bound waiting for a terminal SDK result on a queued-message drain.
+ *
+ * Five minutes is long enough for a real coding-agent turn and short enough
+ * that a hung stream cannot pin the broker indefinitely.
+ */
+const DEFAULT_QUEUED_MESSAGE_TIMEOUT_MS = 300_000;
+
 export interface AgentRuntimeOptions {
   apiKey: string;
   client?: LettaAgentClient;
@@ -53,6 +61,14 @@ export interface AgentRuntimeOptions {
    * runs, so local projects never open a Cloud session.
    */
   sandboxClient?: LettaAgentClient;
+  /**
+   * Bound waiting for a terminal SDK result while draining a queued message.
+   *
+   * Agent SDK 0.7.6 can persist the send and emit turn_finished while never
+   * completing the stream (it waits for usage_statistics). Without a bound,
+   * the broker cannot acknowledge or retry. Defaults to 300000 ms.
+   */
+  queuedMessageTimeoutMs?: number;
 }
 
 export interface RunObservationInput {
@@ -76,6 +92,8 @@ export interface QueuedMessageDelivery {
    * unknown transport result deduplicates instead of posting the text twice.
    */
   deliveryId: string;
+  /** Completed broker attempts before this call. Zero means no send is known. */
+  previousAttempts?: number;
   text: string;
 }
 
@@ -190,9 +208,32 @@ function resultError(result: SDKResultMessage): string {
   );
 }
 
+/**
+ * Resolve `action` unless it outlives `timeoutMs`. The timer is always
+ * cleared, so a fast success does not leave a 5-minute handle behind.
+ */
+async function withTimeout<T>(
+  action: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      action,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export class AgentRuntime {
   private readonly client: LettaAgentClient;
   private readonly apiKey: string;
+  private readonly queuedMessageTimeoutMs: number;
   private sandboxClient: LettaAgentClient | null;
   /**
    * One chain per observed-agent conversation, so two drains can never
@@ -213,6 +254,8 @@ export class AgentRuntime {
 
   constructor(options: AgentRuntimeOptions) {
     this.apiKey = options.apiKey;
+    this.queuedMessageTimeoutMs =
+      options.queuedMessageTimeoutMs ?? DEFAULT_QUEUED_MESSAGE_TIMEOUT_MS;
     this.client =
       options.client ??
       new LettaAgentClient({
@@ -239,37 +282,46 @@ export class AgentRuntime {
     return this.sandboxClient;
   }
 
+  /**
+   * Walk one conversation's history for an OTID.
+   *
+   * Observation recovery and queued-message idempotency share this scan so a
+   * pagination change cannot make one path see a message the other misses.
+   * Callers that must not search sibling conversations pass a single id.
+   */
+  private async conversationContainsOtid(
+    conversationId: string,
+    otid: string,
+  ): Promise<boolean> {
+    let before: string | undefined;
+    const seenCursors = new Set<string>();
+    while (true) {
+      const page = await this.client.conversations.listMessages(
+        conversationId,
+        {
+          limit: 100,
+          order: "desc",
+          ...(before ? { before } : {}),
+        },
+      );
+      if (page.messages.some((message) => message.otid === otid)) return true;
+      const next = page.nextBefore ?? undefined;
+      if (!next || page.hasMore === false || seenCursors.has(next))
+        return false;
+      seenCursors.add(next);
+      before = next;
+    }
+  }
+
   async findConversationByOtid(
     agentId: string,
     otid: string,
     preferredConversationId?: string | null,
   ): Promise<OtidConversationMatch | null> {
     const searched = new Set<string>();
-    const conversationContainsOtid = async (
-      conversationId: string,
-    ): Promise<boolean> => {
-      let before: string | undefined;
-      const seenCursors = new Set<string>();
-      while (true) {
-        const page = await this.client.conversations.listMessages(
-          conversationId,
-          {
-            limit: 100,
-            order: "desc",
-            ...(before ? { before } : {}),
-          },
-        );
-        if (page.messages.some((message) => message.otid === otid)) return true;
-        const next = page.nextBefore ?? undefined;
-        if (!next || page.hasMore === false || seenCursors.has(next))
-          return false;
-        seenCursors.add(next);
-        before = next;
-      }
-    };
     if (preferredConversationId) {
       searched.add(preferredConversationId);
-      if (await conversationContainsOtid(preferredConversationId)) {
+      if (await this.conversationContainsOtid(preferredConversationId, otid)) {
         return { conversationId: preferredConversationId };
       }
     }
@@ -288,7 +340,7 @@ export class AgentRuntime {
       for (const conversation of conversations) {
         if (searched.has(conversation.id)) continue;
         searched.add(conversation.id);
-        if (await conversationContainsOtid(conversation.id)) {
+        if (await this.conversationContainsOtid(conversation.id, otid)) {
           return { conversationId: conversation.id };
         }
       }
@@ -379,6 +431,30 @@ export class AgentRuntime {
         error: `Conversation ${identity.conversationId} belongs to ${conversation.agent_id}, not to the observed agent ${identity.agentId}.`,
       };
     }
+    // A prior attempt may have persisted this deliveryId as the send OTID and
+    // then timed out waiting for a terminal SDK result. Retrying the send
+    // would start a second model turn. Query only this conversation on retries;
+    // a first attempt has nothing to reconcile and avoids a full-history scan.
+    if ((input.previousAttempts ?? 0) > 0) {
+      try {
+        if (
+          await this.conversationContainsOtid(
+            identity.conversationId,
+            input.deliveryId,
+          )
+        ) {
+          return {
+            status: "delivered",
+            nativeReceipt: identity.conversationId,
+          };
+        }
+      } catch (error) {
+        return {
+          status: "retry",
+          error: `The queued-message OTID ${input.deliveryId} could not be read from ${identity.conversationId}: ${errorMessage(error)}`,
+        };
+      }
+    }
     let session: ReturnType<LettaAgentClient["resumeSession"]> | null = null;
     try {
       session = this.client.resumeSession(identity.conversationId, {
@@ -397,10 +473,16 @@ export class AgentRuntime {
       // Agent SDK send() starts the turn, but the session has to remain open and
       // its stream has to be drained for the message and turn to persist. Closing
       // immediately after send can report success while dropping the message.
-      let result: SDKResultMessage | null = null;
-      for await (const sdkMessage of session.stream()) {
-        if (sdkMessage.type === "result") result = sdkMessage;
-      }
+      // Agent SDK 0.7.6 can persist that send and emit turn_finished while
+      // never yielding a stream result (it waits for usage_statistics). Bound
+      // the wait so a hung drain returns retry instead of pinning the broker.
+      const drain = this.collectQueuedMessageResult(session);
+      void drain.catch(() => undefined);
+      const result = await withTimeout(
+        drain,
+        this.queuedMessageTimeoutMs,
+        `The queued-message stream for ${identity.conversationId} timed out after ${this.queuedMessageTimeoutMs}ms waiting for a terminal SDK result.`,
+      );
       if (!result) {
         return {
           status: "retry",
@@ -416,6 +498,20 @@ export class AgentRuntime {
     } finally {
       session?.close();
     }
+  }
+
+  /**
+   * Drain until the SDK yields a terminal result, or the stream ends without
+   * one. Callers bound this wait; the iterator itself has no deadline.
+   */
+  private async collectQueuedMessageResult(
+    session: NonNullable<ReturnType<LettaAgentClient["resumeSession"]>>,
+  ): Promise<SDKResultMessage | null> {
+    let result: SDKResultMessage | null = null;
+    for await (const sdkMessage of session.stream()) {
+      if (sdkMessage.type === "result") result = sdkMessage;
+    }
+    return result;
   }
 
   async run(input: RunObservationInput): Promise<RunObservationResult> {

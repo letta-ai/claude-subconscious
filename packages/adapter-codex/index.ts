@@ -270,11 +270,23 @@ export class CodexAdapter implements HarnessAdapter {
   }
 
   contextChannel(nativeEvent: string): ContextChannel | null {
-    // Codex 0.147.0 ships a hookSpecificOutput schema for both tool events,
-    // and its error strings show non-empty stdout there must be valid JSON.
-    // SubagentStart also accepts context, but it targets the subagent rather
-    // than the route that caused the observation, so it stays unclaimed.
-    if (nativeEvent === "PreToolUse" || nativeEvent === "PostToolUse") {
+    // Codex 0.149.1 ships the same hookSpecificOutput.additionalContext
+    // envelope schema Claude Code does, and it is not optional for any of
+    // these four events - confirmed live, plain stdout on SessionStart or
+    // UserPromptSubmit completes the hook ("Completed", not "Failed") but
+    // the written text never becomes model-attended context, while the
+    // identical text sent as the envelope is read back reliably. The other
+    // harnesses that share `defaultContextChannel` (Claude Code and Letta
+    // Code) genuinely read plain stdout there, so the override lives
+    // here rather than in the shared default. SubagentStart also accepts
+    // context, but it targets the subagent rather than the route that caused
+    // the observation, so it stays unclaimed.
+    if (
+      nativeEvent === "SessionStart" ||
+      nativeEvent === "UserPromptSubmit" ||
+      nativeEvent === "PreToolUse" ||
+      nativeEvent === "PostToolUse"
+    ) {
       return "envelope";
     }
     return defaultContextChannel(nativeEvent);

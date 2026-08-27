@@ -16,6 +16,7 @@ import {
 } from "../core/index.js";
 import { getAdapter } from "./adapters.js";
 import { withHermesHome } from "../adapter-hermes/index.js";
+import { lettaSessionRouteId } from "../adapter-letta-code/index.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -65,16 +66,29 @@ async function readStdin(): Promise<unknown> {
   return input.trim() ? (JSON.parse(input) as unknown) : {};
 }
 
-function targetFor(
+/**
+ * The session this hook leases and acknowledges against.
+ *
+ * The broker keys a route from the session id an observation carried, so this
+ * has to agree with the adapter's normalized event exactly; where the two
+ * disagree the hook leases an empty route forever and never fails. Letta Code
+ * therefore goes through the adapter's own route-id rule rather than reading
+ * `conversation_id` here, because that value is not unique within a project.
+ *
+ * Exported so a test can hold the two derivations against each other.
+ */
+export function targetFor(
   harness: HarnessId,
   input: Record<string, unknown>,
 ): DeliveryTarget | null {
   const workingDirectory =
     stringValue(input.cwd) ?? stringValue(input.working_directory);
   const sessionId =
-    stringValue(input.conversation_id) ??
-    stringValue(input.session_id) ??
-    stringValue(input.thread_id);
+    harness === "letta-code"
+      ? lettaSessionRouteId(input)
+      : (stringValue(input.conversation_id) ??
+        stringValue(input.session_id) ??
+        stringValue(input.thread_id));
   if (!workingDirectory || !sessionId) return null;
   return { harness, sessionId, workingDirectory };
 }

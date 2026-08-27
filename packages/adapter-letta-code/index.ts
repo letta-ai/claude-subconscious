@@ -23,6 +23,43 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/**
+ * The Letta conversation this hook payload belongs to, as Letta Code reports
+ * it.
+ *
+ * This is the raw value the Agent SDK addresses a queued message with, so it
+ * stays unscoped even where a route needs more than it to be unique.
+ */
+function lettaConversationId(
+  source: Record<string, unknown>,
+): string | undefined {
+  return stringValue(source.conversation_id) ?? stringValue(source.session_id);
+}
+
+/**
+ * The session identity a Letta Code route is keyed from.
+ *
+ * Letta Code 0.30.32 names a local conversation per agent: the first local
+ * conversation of every agent is `default`, so two agents working in one
+ * project both report `conversation_id: "default"`. A route keyed from the
+ * conversation alone merges those two sessions into one, and their
+ * observations, leases and acknowledgements then cross between agents.
+ * Pairing the agent with the conversation separates them again. Without an
+ * agent id there is no stable route identity, so the event is skipped rather
+ * than allowing one session to flap between scoped and unscoped route keys.
+ *
+ * Exported so the hook's delivery target and this adapter's normalized event
+ * derive the same key: observe creates the route, lease and ack look it up,
+ * and a mismatch between them is a session that silently never receives.
+ */
+export function lettaSessionRouteId(source: unknown): string | null {
+  if (!isRecord(source)) return null;
+  const conversationId = lettaConversationId(source);
+  if (!conversationId) return null;
+  const agentId = stringValue(source.agent_id);
+  return agentId ? `${agentId}:${conversationId}` : null;
+}
+
 export class LettaCodeAdapter implements HarnessAdapter {
   readonly id = "letta-code" as const;
   readonly capabilities = {
@@ -49,8 +86,7 @@ export class LettaCodeAdapter implements HarnessAdapter {
             ? "turn_stop"
             : null;
     if (!type) return null;
-    const sessionId =
-      stringValue(input.conversation_id) ?? stringValue(input.session_id);
+    const sessionId = lettaSessionRouteId(input);
     const workingDirectory =
       stringValue(input.working_directory) ?? stringValue(input.cwd);
     if (!sessionId || !workingDirectory) return null;
@@ -125,16 +161,17 @@ export class LettaCodeAdapter implements HarnessAdapter {
   /**
    * The coding agent behind this hook, not the observer.
    *
-   * `sessionId` already carries the Letta Code conversation, but a queued
-   * message is addressed to an agent as well as a conversation, and reading
-   * both from the payload keeps the pair consistent. The hook fills `agent_id`
-   * from its input or from AGENT_ID/LETTA_AGENT_ID; an event without it cannot
-   * be addressed and returns null rather than a half identity.
+   * A queued message is addressed to an agent as well as a conversation, and
+   * reading both from the payload keeps the pair consistent. `sessionId` is no
+   * use here: it is the route id, which scopes the conversation by agent, and
+   * the Agent SDK addresses the conversation Letta Code actually reported. The
+   * hook fills `agent_id` from its input or from AGENT_ID/LETTA_AGENT_ID; an
+   * event without it cannot be addressed and returns null rather than a half
+   * identity.
    */
   harnessLettaIdentity(event: HarnessEvent): HarnessLettaIdentity | null {
     const agentId = stringValue(event.payload.agent_id);
-    const conversationId =
-      stringValue(event.payload.conversation_id) ?? event.sessionId;
+    const conversationId = lettaConversationId(event.payload);
     if (!agentId || !conversationId) return null;
     return { agentId, conversationId };
   }

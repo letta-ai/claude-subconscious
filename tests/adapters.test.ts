@@ -318,17 +318,18 @@ describe("harness adapters", () => {
     expect(first?.id).not.toBe(second?.id);
   });
 
-  it("uses the Letta Code conversation as native session identity", async () => {
+  it("uses the Letta Code agent and conversation as native session identity", async () => {
     const directory = await root();
     const event = await lettaCodeAdapter.normalizeHookInput({
       event_type: "Stop",
       working_directory: directory,
       conversation_id: "conv-parent",
+      agent_id: "agent-parent",
       user_message: "question",
       assistant_message: "answer",
       stop_reason: "end_turn",
     });
-    expect(event?.sessionId).toBe("conv-parent");
+    expect(event?.sessionId).toBe("agent-parent:conv-parent");
     expect(
       (await lettaCodeAdapter.prepareObservation(event!, undefined)).text,
     ).toContain("answer");
@@ -340,6 +341,7 @@ describe("harness adapters", () => {
       event_type: "Stop",
       working_directory: directory,
       conversation_id: "conv-parent",
+      agent_id: "agent-parent",
       user_message: "same",
       assistant_message: "same",
       stop_reason: "end_turn",
@@ -355,12 +357,13 @@ describe("harness adapters", () => {
       event_type: "UserPromptSubmit",
       working_directory: directory,
       conversation_id: "conv-parent",
+      agent_id: "agent-parent",
       prompt: "Check the release order.",
     });
     expect(event).toMatchObject({
       harness: "letta-code",
       type: "user_prompt",
-      sessionId: "conv-parent",
+      sessionId: "agent-parent:conv-parent",
     });
     expect(
       (await lettaCodeAdapter.prepareObservation(event!, undefined)).text,
@@ -394,15 +397,75 @@ describe("harness adapters", () => {
     });
   });
 
-  it("refuses a half Letta Code identity", async () => {
+  it("refuses a Letta Code route with an agent but no conversation", async () => {
     const directory = await root();
     const event = await lettaCodeAdapter.normalizeHookInput({
       event_type: "UserPromptSubmit",
       working_directory: directory,
-      conversation_id: "conv-harness",
+      agent_id: "agent-harness",
       prompt: "Check the release order.",
     });
-    expect(lettaCodeAdapter.harnessLettaIdentity!(event!)).toBeNull();
+    expect(event).toBeNull();
+  });
+
+  it("separates two agents that share the local conversation name", async () => {
+    // Letta Code 0.30.32 names the first local conversation of every agent
+    // `default`, so a route keyed from the conversation alone merges two
+    // agents working in one project into one session.
+    const directory = await root();
+    const prompt = (agentId: string) => ({
+      event_type: "UserPromptSubmit" as const,
+      working_directory: directory,
+      conversation_id: "default",
+      agent_id: agentId,
+      prompt: "Check the release order.",
+    });
+    const first = await lettaCodeAdapter.normalizeHookInput(
+      prompt("agent-one"),
+    );
+    const second = await lettaCodeAdapter.normalizeHookInput(
+      prompt("agent-two"),
+    );
+    expect(first?.sessionId).toBe("agent-one:default");
+    expect(second?.sessionId).toBe("agent-two:default");
+    expect(first?.sessionId).not.toBe(second?.sessionId);
+    // The queue is still addressed to the conversation Letta Code reported,
+    // not to the scoped route id.
+    expect(lettaCodeAdapter.harnessLettaIdentity!(first!)).toEqual({
+      agentId: "agent-one",
+      conversationId: "default",
+    });
+    expect(lettaCodeAdapter.harnessLettaIdentity!(second!)).toEqual({
+      agentId: "agent-two",
+      conversationId: "default",
+    });
+  });
+
+  it("falls back to the session id for the conversation the queue addresses", async () => {
+    const directory = await root();
+    const event = await lettaCodeAdapter.normalizeHookInput({
+      event_type: "UserPromptSubmit",
+      working_directory: directory,
+      session_id: "conv-fallback",
+      agent_id: "agent-harness",
+      prompt: "Check the release order.",
+    });
+    expect(event?.sessionId).toBe("agent-harness:conv-fallback");
+    expect(lettaCodeAdapter.harnessLettaIdentity!(event!)).toEqual({
+      agentId: "agent-harness",
+      conversationId: "conv-fallback",
+    });
+  });
+
+  it("rejects a Letta Code conversation without an agent route scope", async () => {
+    const directory = await root();
+    const event = await lettaCodeAdapter.normalizeHookInput({
+      event_type: "UserPromptSubmit",
+      working_directory: directory,
+      conversation_id: "conv-parent",
+      prompt: "Check the release order.",
+    });
+    expect(event).toBeNull();
   });
 
   it("skips Letta Code Stop events that have no conversation identity", async () => {
