@@ -7,7 +7,7 @@
 
 # Claude Subconscious
 
-A background agent that whispers to Claude Code. A subconcious agent that watches your sessions, reads your files, builds up memory over time, and whispers guidance back.
+A background agent that whispers to Claude Code. A subconscious agent that watches your sessions, reads your files, builds up memory over time, and whispers guidance back.
 
 ![evil claude](assets/evil-claude.jpeg)
 
