@@ -35,6 +35,7 @@ const PREFERRED_MODELS = [
   'google_ai/gemini-3-flash',    // Google's balanced option
   'google_ai/gemini-2.5-flash',  // Fallback
   'minimax/MiniMax-M2.7',        // MiniMax flagship, 1M context
+  'orcarouter/auto',             // OrcaRouter smart-routing gateway (https://www.orcarouter.ai)
 ];
 
 interface Config {

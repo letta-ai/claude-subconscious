@@ -106,6 +106,7 @@ const SAMPLE_MODELS = [
   { model: 'gemini-3-pro-preview', name: 'gemini-3-pro-preview', provider_type: 'google_ai', handle: 'google_ai/gemini-3-pro-preview' },
   { model: 'gemini-3-pro-preview', name: 'gemini-3-pro-preview', provider_type: 'google_ai', handle: 'gem1/gemini-3-pro-preview' },
   { model: 'gpt-5.2', name: 'gpt-5.2', provider_type: 'openai', handle: 'openai/gpt-5.2' },
+  { model: 'auto', name: 'auto', provider_type: 'orcarouter', handle: 'orcarouter/auto' },
 ];
 
 describe('findModel', () => {
@@ -130,6 +131,12 @@ describe('findModel', () => {
     const result = findModel(SAMPLE_MODELS, 'gpt-5.2');
     expect(result).not.toBeNull();
     expect(result!.provider_type).toBe('openai');
+  });
+
+  it('should find an OrcaRouter gateway model by handle', () => {
+    const result = findModel(SAMPLE_MODELS, 'orcarouter/auto');
+    expect(result).not.toBeNull();
+    expect(result!.handle).toBe('orcarouter/auto');
   });
 
   it('should return null for unknown model', () => {
@@ -193,5 +200,13 @@ describe('buildLlmConfig', () => {
     expect(config.model).toBe('gpt-5.2');
     expect(config.handle).toBe('openai/gpt-5.2');
     expect(config.provider_name).toBe('openai');
+  });
+
+  it('should split an OrcaRouter model handle into provider and model', () => {
+    const config = buildLlmConfig('orcarouter/auto', SAMPLE_MODELS, undefined);
+    expect(config.model).toBe('auto');
+    expect(config.handle).toBe('orcarouter/auto');
+    expect(config.provider_name).toBe('orcarouter');
+    expect(config.model_endpoint_type).toBe('orcarouter');
   });
 });
