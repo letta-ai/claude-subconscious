@@ -405,6 +405,11 @@ async function main(): Promise<void> {
     const errorMessage = error instanceof Error ? error.message : String(error);
     log(`ERROR: ${errorMessage}`);
 
+    // Always surface to stderr — writeTty() is a no-op on Windows (tty is
+    // never opened there), which otherwise leaves this error visible only
+    // in the per-run log file.
+    console.error(`Letta error: ${errorMessage}`);
+
     // Show error to user
     writeTty('\r\x1b[K'); // Clear current line
     writeTty('\x1b[31m'); // Red
