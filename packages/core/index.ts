@@ -10,3 +10,4 @@ export * from "./routing.js";
 export * from "./state.js";
 export * from "./status.js";
 export * from "./types.js";
+export * from "./whisper.js";

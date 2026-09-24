@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   defaultContextChannel,
-  escapeXml,
+  formatWhispers,
   eventId,
   formatSessionStatus,
   truncateText,
@@ -146,12 +146,7 @@ export class LettaCodeAdapter implements HarnessAdapter {
   }
 
   formatWhispers(deliveries: DeliveryRecord[]): string {
-    return deliveries
-      .map(
-        (delivery) =>
-          `<subconscious_whisper delivery_id="${escapeXml(delivery.id)}">\n${escapeXml(delivery.text)}\n</subconscious_whisper>`,
-      )
-      .join("\n\n");
+    return formatWhispers(deliveries);
   }
 
   formatStatus(status: SessionStatus): string {

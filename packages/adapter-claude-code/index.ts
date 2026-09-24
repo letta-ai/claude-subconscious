@@ -1,6 +1,6 @@
 import { stat } from "node:fs/promises";
 import {
-  escapeXml,
+  formatWhispers,
   eventId,
   formatSessionStatus,
   readJsonlDelta,
@@ -141,10 +141,6 @@ function midTurnHeader(event: HarnessEvent): string {
   return `Claude Code is still working on this turn. Its most recent tool call was ${tool ?? "an unnamed tool"}${failed ? ", and it reported an error" : ""}.`;
 }
 
-function formatDelivery(delivery: DeliveryRecord): string {
-  return `<subconscious_whisper delivery_id="${escapeXml(delivery.id)}">\n${escapeXml(delivery.text)}\n</subconscious_whisper>`;
-}
-
 export class ClaudeCodeAdapter implements HarnessAdapter {
   readonly id = "claude-code" as const;
   readonly capabilities = {
@@ -280,7 +276,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
   }
 
   formatWhispers(deliveries: DeliveryRecord[]): string {
-    return deliveries.map(formatDelivery).join("\n\n");
+    return formatWhispers(deliveries);
   }
 
   formatStatus(status: SessionStatus): string {

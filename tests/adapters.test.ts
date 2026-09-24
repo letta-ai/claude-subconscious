@@ -4,8 +4,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { claudeCodeAdapter } from "../packages/adapter-claude-code/index.js";
 import { codexAdapter } from "../packages/adapter-codex/index.js";
+import { hermesAdapter } from "../packages/adapter-hermes/index.js";
 import { lettaCodeAdapter } from "../packages/adapter-letta-code/index.js";
-import type { HarnessAdapter } from "../packages/core/index.js";
+import {
+  WHISPER_PREAMBLE,
+  type HarnessAdapter,
+} from "../packages/core/index.js";
 
 const roots: string[] = [];
 
@@ -514,6 +518,37 @@ describe("session status", () => {
     });
     expect(output).toBe(
       '<subconscious_status agent_id="agent-f036ea00-dded-4f58-ab3b-044d2f42f9c5" />',
+    );
+  });
+});
+
+describe("whisper wrapper", () => {
+  const delivery = {
+    id: "delivery-one",
+    routeKey: "route-one",
+    observationId: "observation-one",
+    kind: "whisper" as const,
+    text: "The migration runs before the deploy.",
+    priority: "normal" as const,
+    dedupeKey: "migration-order",
+    status: "pending" as const,
+    createdAt: "2026-09-24T00:00:00.000Z",
+    expiresAt: "2026-09-24T01:00:00.000Z",
+    attempts: 0,
+  };
+
+  it("frames every whisper the same way on every harness", () => {
+    const expected = `<subconscious_whisper delivery_id="delivery-one">\n${WHISPER_PREAMBLE}\n\nThe migration runs before the deploy.\n</subconscious_whisper>`;
+    expect(claudeCodeAdapter.formatWhispers([delivery])).toBe(expected);
+    expect(codexAdapter.formatWhispers([delivery])).toBe(expected);
+    expect(lettaCodeAdapter.formatWhispers([delivery])).toBe(expected);
+    expect(hermesAdapter.formatWhispers([delivery])).toBe(expected);
+  });
+
+  it("tells the agent that current code outranks the whisper", () => {
+    expect(WHISPER_PREAMBLE).toContain("one-way channel");
+    expect(WHISPER_PREAMBLE).toContain(
+      "current source code and tool output take precedence",
     );
   });
 });

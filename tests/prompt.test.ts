@@ -83,6 +83,36 @@ describe("Subconscious conversation prompts", () => {
     expect(prompt).not.toContain("queue_message");
   });
 
+  it("states how whispers travel only when whispers are available", () => {
+    const withWhisper = formatObservationPrompt(
+      event("session_start"),
+      config,
+      "Agent session started.",
+      ["send_whisper"],
+      "/project",
+      true,
+    );
+    const queueOnly = formatObservationPrompt(
+      event("session_start"),
+      config,
+      "Agent session started.",
+      ["queue_message"],
+      "/project",
+      true,
+    );
+
+    expect(withWhisper).toContain("A whisper cannot interrupt the agent");
+    expect(withWhisper).toContain("never the one you are observing");
+    expect(withWhisper).toContain(
+      "name the source of every claim, when you last verified it, and how the agent can check it",
+    );
+    expect(withWhisper).toContain("At a turn stop, update memory");
+    expect(withWhisper).toContain("Neither checks relevance");
+    expect(withWhisper).toContain("Recheck time-sensitive claims");
+    expect(queueOnly).not.toContain("A whisper cannot interrupt");
+    expect(queueOnly).toContain("Recheck time-sensitive claims");
+  });
+
   it("does not force a session-start delivery", () => {
     const prompt = formatObservationPrompt(
       event("session_start"),
