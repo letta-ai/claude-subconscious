@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { WHISPER_PREAMBLE } from "../packages/core/index.js";
 import {
   normalizeSnapshot,
   opencodeAdapter,
@@ -406,7 +407,7 @@ describe("opencode adapter", () => {
     });
     expect(opencodeAdapter.contextChannel("session.created")).toBeNull();
     expect(opencodeAdapter.formatWhispers([delivery])).toBe(
-      '<subconscious_whisper delivery_id="d&lt;1&gt;">\nUse &quot;quoted&quot; &amp; safe text.\n</subconscious_whisper>',
+      `<subconscious_whisper delivery_id="d&lt;1&gt;">\n${WHISPER_PREAMBLE}\n\nUse &quot;quoted&quot; &amp; safe text.\n</subconscious_whisper>`,
     );
     expect(
       opencodeAdapter.formatStatus({

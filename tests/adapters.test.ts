@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { claudeCodeAdapter } from "../packages/adapter-claude-code/index.js";
 import { codexAdapter } from "../packages/adapter-codex/index.js";
 import { hermesAdapter } from "../packages/adapter-hermes/index.js";
+import { opencodeAdapter } from "../packages/adapter-opencode/index.js";
 import { lettaCodeAdapter } from "../packages/adapter-letta-code/index.js";
 import {
   WHISPER_PREAMBLE,
@@ -543,6 +544,7 @@ describe("whisper wrapper", () => {
     expect(codexAdapter.formatWhispers([delivery])).toBe(expected);
     expect(lettaCodeAdapter.formatWhispers([delivery])).toBe(expected);
     expect(hermesAdapter.formatWhispers([delivery])).toBe(expected);
+    expect(opencodeAdapter.formatWhispers([delivery])).toBe(expected);
   });
 
   it("tells the agent that current code outranks the whisper", () => {
